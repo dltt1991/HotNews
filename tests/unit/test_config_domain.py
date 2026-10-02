@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 
-from hotnews.config import load_config, load_feishu_config
+from hotnews.config import AppConfig, load_config, load_feishu_config
 from hotnews.domain import Intent, NewsResult, Schedule, Subscription, ValidationError
 
 
@@ -40,6 +40,7 @@ class ConfigDomainTests(unittest.TestCase):
         self.assertFalse(hasattr(config, "verification_token"))
 
     def test_default_ports_timezone_and_operational_limits(self):
+        self.assertEqual(AppConfig().callback.max_body_bytes, 1024 * 1024)
         config = load_config(self.write_config({}))
         self.assertEqual((config.callback.host, config.callback.port), ("127.0.0.1", 8080))
         self.assertEqual((config.admin.host, config.admin.port), ("127.0.0.1", 8081))

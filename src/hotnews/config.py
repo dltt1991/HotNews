@@ -37,7 +37,7 @@ class WorkerConfig:
 @dataclass(frozen=True)
 class AppConfig:
     database_path: str = "data/hotnews.db"
-    callback: ServerConfig = ServerConfig("127.0.0.1", 8080)
+    callback: ServerConfig = ServerConfig("127.0.0.1", 8080, 1024 * 1024)
     admin: ServerConfig = ServerConfig("127.0.0.1", 8081)
     worker: WorkerConfig = WorkerConfig()
     timezone: str = "Asia/Shanghai"
