@@ -8,6 +8,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.message import Message
+from http.client import IncompleteRead
 from unittest.mock import patch
 from urllib.response import addinfourl
 
@@ -411,6 +412,20 @@ class FeishuClientTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(FeishuAPIError):
                 FeishuClient(config(), ScriptedTransport([token(), response(payload)])).send_text("oc", "text", "key")
 
+    def test_non_json_errors_keep_http_retry_metadata_but_malformed_success_is_permanent(self):
+        cases = ((429, {"Retry-After": "600"}, True, 600),
+                 (503, {"x-ogw-ratelimit-reset": "900", "Retry-After": "600"}, True, 900),
+                 (500, {"x-ogw-ratelimit-reset": "invalid", "Retry-After": "600"}, True, 600),
+                 (200, {"Retry-After": "600"}, False, None),
+                 (403, {}, False, None))
+        for status, headers, retryable, delay in cases:
+            for body in (b"<html>test-app-secret</html>", b"", b"{\"truncated\":", b"\xff"):
+                with self.subTest(status=status, body=body), self.assertRaises(FeishuAPIError) as caught:
+                    FeishuClient(config(), ScriptedTransport([token(), HttpResponse(status, headers, body)])).send_text("oc", "text", "key")
+                self.assertEqual((caught.exception.status, caught.exception.retryable, caught.exception.retry_after),
+                                 (status, retryable, delay))
+                self.assertNotIn("test-app-secret", str(caught.exception))
+
     def test_errors_do_not_expose_remote_body_headers_or_transport_secrets(self):
         secret = "test-app-secret tenant-token-1 test-verification-token"
         cases = (response({"code": 230001, "msg": secret}), OSError(secret))
@@ -505,6 +520,8 @@ class HttpTransportTests(unittest.TestCase):
         for key, value in headers.items():
             message[key] = value
         result = addinfourl(io.BytesIO(body), message, url, status)
+        if not hasattr(result, "status"):
+            result.status = status  # Python 3.8 fixture also mirrors HTTPS.status.
         result.msg = "HTTP response"
         return result
 
@@ -518,6 +535,23 @@ class HttpTransportTests(unittest.TestCase):
                                               body=b'{"hello":1}')
             self.assertEqual((result.status, result.headers["Retry-After"], result.body),
                              (429, "7", b'{"hello":1}'))
+
+    def test_real_urllib_response_read_failure_becomes_sanitized_retryable_client_error(self):
+        def fetch(request):
+            if request.full_url.endswith("tenant_access_token/internal"):
+                return self.network_response(request.full_url, 200, token().body, {})
+            reply = self.network_response(request.full_url, 200, b"", {})
+            def incomplete_body():
+                raise IncompleteRead(b"test-app-secret sensitive body", 99)
+            reply.read = incomplete_body
+            return reply
+
+        with patch("urllib.request.HTTPSHandler.https_open", side_effect=fetch):
+            with self.assertRaises(FeishuAPIError) as caught:
+                FeishuClient(config(), UrllibTransport()).send_text("oc", "hello", "key")
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(str(caught.exception), "Feishu network request failed")
+        self.assertTrue(caught.exception.__suppress_context__)
 
     def test_urllib_transport_does_not_forward_authorization_on_redirect(self):
         forwarded = []

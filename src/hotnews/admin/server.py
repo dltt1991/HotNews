@@ -1,12 +1,11 @@
 """HTTP framing adapter for the strictly local management application."""
 
-import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ..config import AppConfig
 from ..domain import ValidationError
-from ..http import supervise_request_errors
+from ..http import ContentLengthError, bounded_content_length, supervise_request_errors
 from ..storage.database import Database
 from ..storage.subscriptions import SubscriptionRepository
 from .app import AdminApplication
@@ -24,9 +23,12 @@ def make_handler(app: AdminApplication):
         def _dispatch(self):
             body = b""
             length = self.headers.get("Content-Length", "0")
-            if re.fullmatch(r"[0-9]+", length) and "Transfer-Encoding" not in self.headers:
-                size = int(length)
-                if size <= app.max_body_bytes:
+            if "Transfer-Encoding" not in self.headers:
+                try:
+                    size = bounded_content_length(length, app.max_body_bytes)
+                except ContentLengthError:
+                    pass  # The application maps framing errors to safe HTTP responses.
+                else:
                     try:
                         body = self.rfile.read(size)
                     except OSError:

@@ -1,6 +1,7 @@
 import sys
 import socket
 import threading
+import re
 from typing import Mapping, Optional, Protocol
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -9,6 +10,26 @@ from .domain import HttpResponse
 
 
 USER_AGENT = "hotnews-agent/0.1 (+https://localhost)"
+
+
+class ContentLengthError(ValueError):
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__("invalid or excessive Content-Length")
+
+
+def bounded_content_length(value: str, maximum: int) -> int:
+    """Validate framing before integer conversion on all supported Pythons."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+", value):
+        raise ContentLengthError(400)
+    # Even a 64-bit body length fits in twenty decimal digits. Reject excess
+    # padding too, so untrusted headers never reach Python's digit-limit path.
+    if len(value) > 20:
+        raise ContentLengthError(413)
+    size = int(value)
+    if size > maximum:
+        raise ContentLengthError(413)
+    return size
 
 
 def supervise_request_errors(server, stop_event: threading.Event) -> threading.Event:

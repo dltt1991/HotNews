@@ -3,7 +3,6 @@
 from dataclasses import replace
 import json
 import os
-import re
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,7 +10,7 @@ from typing import Mapping, Optional
 
 from ..config import AppConfig, FeishuConfig, load_feishu_config
 from ..domain import HttpResponse, ValidationError
-from ..http import supervise_request_errors
+from ..http import ContentLengthError, bounded_content_length, supervise_request_errors
 from ..storage.database import Database
 from ..storage.events import EventRepository
 from ..storage.outbox import OutboxRepository
@@ -57,11 +56,10 @@ class GatewayApplication:
             return _json_response(413, {"error": "callback body too large"})
         declared_length = lowered.get("content-length")
         if declared_length is not None:
-            if not re.fullmatch(r"[0-9]+", declared_length):
-                return _json_response(400, {"error": "invalid request framing"})
-            length = int(declared_length)
-            if length > self.max_body_bytes:
-                return _json_response(413, {"error": "callback body too large"})
+            try:
+                length = bounded_content_length(declared_length, self.max_body_bytes)
+            except ContentLengthError as error:
+                return _json_response(error.status, {"error": "callback body too large" if error.status == 413 else "invalid request framing"})
             if length != len(body):
                 return _json_response(400, {"error": "invalid request framing"})
         if "transfer-encoding" in lowered:
@@ -107,9 +105,12 @@ def make_handler(app: GatewayApplication):
         def _dispatch(self):
             body = b""
             declared_length = self.headers.get("Content-Length", "0")
-            if re.fullmatch(r"[0-9]+", declared_length):
-                size = int(declared_length)
-                if size <= app.max_body_bytes:
+            if "Transfer-Encoding" not in self.headers:
+                try:
+                    size = bounded_content_length(declared_length, app.max_body_bytes)
+                except ContentLengthError:
+                    pass
+                else:
                     try:
                         body = self.rfile.read(size)
                     except OSError:

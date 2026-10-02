@@ -1,6 +1,7 @@
 """Injectable Feishu application client with cached tenant tokens."""
 
 import json
+from http.client import HTTPException
 import math
 import time
 from threading import Lock
@@ -78,15 +79,18 @@ class FeishuClient:
         try:
             response = self.transport.request(method, BASE_URL + path, headers=headers,
                                               body=body, timeout=self.timeout)
-        except OSError:
+        except (OSError, HTTPException):
             raise FeishuAPIError("Feishu network request failed", retryable=True) from None
         try:
             payload = json.loads(response.body.decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("response must be an object")
-        except (ValueError, UnicodeError):
-            raise FeishuAPIError("invalid Feishu API response", status=response.status,
-                                 retryable=response.status == 429 or response.status >= 500) from None
+        except (ValueError, UnicodeError, RecursionError):
+            if response.status < 200 or response.status >= 300:
+                # Proxies may return HTML/empty/truncated JSON errors. Status and
+                # rate-limit headers still determine safe retry behavior.
+                return response, {}
+            raise FeishuAPIError("invalid Feishu API response", status=response.status) from None
         return response, payload
 
     def _tenant_token(self, refresh: bool = False) -> str:

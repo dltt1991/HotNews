@@ -2,7 +2,9 @@
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPException, IncompleteRead
 import json
+import logging
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -62,6 +64,13 @@ class WorkerTests(unittest.TestCase):
         self.outbox = OutboxRepository(self.database)
         self.subscriptions = SubscriptionRepository(self.database)
         self.runs = RunRepository(self.database)
+        # Retry/error cases assert their logs where relevant; other expected
+        # diagnostics stay isolated from unittest's human-readable output.
+        logger = logging.getLogger("hotnews.runtime")
+        for name, value in (("handlers", [logging.NullHandler()]), ("propagate", False)):
+            isolated = patch.object(logger, name, value)
+            isolated.start()
+            self.addCleanup(isolated.stop)
 
     def worker(self, transport=None, config=None):
         from hotnews.runtime import OutboxWorker
@@ -251,6 +260,72 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.subscriptions.get(sub.id).consecutive_failures, 1)
         self.assertEqual(len(self.runs.claim_due("new", 3, current, 900)), 1)
 
+    def test_incomplete_http_body_is_retryable_and_does_not_block_another_digest(self):
+        for error in (IncompleteRead(b"sensitive partial body", 99), HTTPException(SECRET)):
+            with self.subTest(error=type(error).__name__):
+                first, _ = self.prepare("truncated:" + type(error).__name__.lower())
+                second, _ = self.prepare("healthy:" + type(error).__name__.lower())
+                worker, transport = self.worker(Transport([error]))
+                with self.assertLogs("hotnews.runtime", level="WARNING") as captured:
+                    worker.run_once(NOW)
+                self.assertIn("deferred for retry", str(captured.output))
+                self.assertNotIn(SECRET, str(captured.output))
+                self.assertEqual(self.subscriptions.get(second.id).last_success_at, NOW)
+                self.assertEqual(self.runs.history(first.id), [])
+                row = next(row for row in self.rows("outbox") if row["chat_id"] == first.chat_id)
+                self.assertEqual((row["status"], _datetime(row["next_attempt_at"])),
+                                 ("pending", NOW + timedelta(seconds=10)))
+                worker.run_once(NOW + timedelta(seconds=10))
+                self.assertEqual(transport.messages[0], transport.messages[2])
+                self.assertEqual(self.runs.history(first.id)[0]["event_key"], "release:" + first.chat_id)
+
+    def test_non_json_rate_limit_preserves_header_priority_and_defers_only_its_digest(self):
+        for headers, delay in (({"Retry-After": "600"}, 600),
+                               ({"X-Ogw-Ratelimit-Reset": "900", "Retry-After": "600"}, 900),
+                               ({"X-Ogw-Ratelimit-Reset": "nan", "Retry-After": "600"}, 600)):
+            with self.subTest(headers=headers):
+                first, _ = self.prepare("rate:" + str(delay) + str(len(headers)))
+                second, _ = self.prepare("healthy:" + str(delay) + str(len(headers)))
+                reply = HttpResponse(429, headers, b"<html>sensitive gateway error</html>")
+                worker, transport = self.worker(Transport([reply]))
+                with self.assertLogs("hotnews.runtime", level="WARNING"):
+                    worker.run_once(NOW)
+                row = next(row for row in self.rows("outbox") if row["chat_id"] == first.chat_id)
+                self.assertEqual(_datetime(row["next_attempt_at"]), NOW + timedelta(seconds=delay))
+                self.assertEqual(self.subscriptions.get(second.id).last_success_at, NOW)
+                self.assertEqual(self.runs.history(first.id), [])
+                worker.run_once(NOW + timedelta(seconds=delay))
+                self.assertEqual(transport.messages[0], transport.messages[2])
+
+    def test_manual_request_after_preparation_does_not_invalidate_scheduled_success(self):
+        sub, run = self.prepare()
+        manual_id = self.subscriptions.request_manual_run(sub.id, sub.version, now=NOW)
+        requested = self.subscriptions.get(sub.id)
+        self.assertEqual(requested.version, sub.version + 1)
+        worker, _ = self.worker()
+        worker.run_once(NOW)
+        current = self.subscriptions.get(sub.id)
+        self.assertEqual(current.next_run_at, NOW + timedelta(minutes=5))
+        self.assertEqual(current.last_success_at, NOW)
+        claimed = self.runs.claim_due("next", 3, NOW, 900)
+        self.assertEqual([(item.id, item.trigger) for item in claimed], [(manual_id, "manual")])
+        self.runs.complete(manual_id, "next", [], now=NOW)
+        self.assertEqual(self.runs.claim_due("next", 3, NOW, 900), [])
+        with self.database.connect() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM subscription_runs WHERE trigger='scheduled'").fetchone()[0], 1)
+        self.assertEqual(self.runs.complete(run.id, "research", [], now=NOW).status, "completed")
+
+    def test_real_edit_then_manual_request_still_invalidates_older_scheduled_snapshot(self):
+        sub, _ = self.prepare()
+        edited = self.subscriptions.update(sub.id, sub.version, topic="edited topic",
+                                           schedule=Schedule("daily", daily_at="20:00"), now=NOW)
+        self.subscriptions.request_manual_run(sub.id, edited.version, now=NOW)
+        requested = self.subscriptions.get(sub.id)
+        worker, _ = self.worker()
+        worker.run_once(NOW)
+        self.assertEqual(self.subscriptions.get(sub.id), requested)
+        self.assertEqual(self.rows("subscription_runs")[0]["status"], "completed")
+
     def test_exponential_backoff_is_capped(self):
         worker, _ = self.worker()
         self.assertEqual([worker.retry_delay(attempt) for attempt in (1, 5, 6, 7, 10000)], [10, 160, 300, 300, 300])
@@ -319,6 +394,64 @@ class WorkerTests(unittest.TestCase):
 
 
 class ServiceTests(unittest.TestCase):
+    def test_excessive_content_length_returns_413_and_servers_keep_running(self):
+        from hotnews.admin import server as admin_server
+        from hotnews.admin.app import AdminApplication
+        from hotnews.feishu import gateway
+        from tests.integration.test_gateway import MemorySocket
+        from tests.unit.test_feishu import config as feishu_config
+        for module in (admin_server, gateway):
+            with self.subTest(service=module.__name__), tempfile.TemporaryDirectory() as directory:
+                settings = AppConfig(database_path=str(Path(directory) / "framing.db"))
+                database = Database(settings.database_path)
+                database.migrate()
+                app = (gateway.GatewayApplication(settings, feishu_config(), database) if module is gateway
+                       else AdminApplication(settings, SubscriptionRepository(database)))
+                route = "/callbacks/feishu" if module is gateway else "/api/session"
+                method = "POST" if module is gateway else "GET"
+                huge = "9" * 5000
+                headers = {"Host": "127.0.0.1:8081", "Content-Type": "application/json", "Content-Length": huge}
+                stop = threading.Event()
+                seen = []
+
+                class ServerBoundary:
+                    def __init__(inner, address, handler):
+                        inner.handler = handler
+                    def __enter__(inner):
+                        return inner
+                    def __exit__(inner, *args):
+                        pass
+                    def handle_request(inner):
+                        # Emulate Python 3.11's digit-conversion limit on the
+                        # current Python 3.8 host without mocking safe small ints.
+                        original_int = int
+                        def limited_int(value, *args):
+                            if isinstance(value, str) and len(value) > 4300:
+                                raise ValueError("Exceeds integer string conversion limit")
+                            return original_int(value, *args)
+                        request = ("%s %s HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nContent-Type: application/json\r\n"
+                                   "Content-Length: %s\r\n\r\n" % (method, route, huge)).encode()
+                        socket = MemorySocket(request)
+                        with patch.object(module, "int", limited_int, create=True), \
+                             patch.object(gateway, "int", limited_int, create=True), \
+                             patch("hotnews.http.int", limited_int, create=True), \
+                             patch("hotnews.admin.app.int", limited_int, create=True):
+                            try:
+                                inner.handler(socket, ("127.0.0.1", 1234), inner)
+                            except Exception:
+                                inner.handle_error(None, ("127.0.0.1", 1234))
+                        seen.append(bytes(socket.outgoing))
+                        seen.append(stop.is_set())
+                        stop.set()
+
+                with patch.object(module, "ThreadingHTTPServer", ServerBoundary):
+                    if module is gateway:
+                        module.serve_gateway(settings, stop, feishu_config())
+                    else:
+                        module.serve_admin(settings, stop)
+                self.assertIn(b"413 Request Entity Too Large", seen[0])
+                self.assertFalse(seen[1])
+                self.assertEqual(app.handle(method, route, headers, b"").status, 413)
     def test_http_client_disconnect_does_not_stop_or_dump_request_errors(self):
         from hotnews.http import supervise_request_errors
         stop = threading.Event()

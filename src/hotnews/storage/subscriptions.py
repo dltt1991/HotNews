@@ -288,5 +288,13 @@ class SubscriptionRepository:
             "INSERT INTO subscription_runs (id, subscription_id, trigger, created_at, subscription_version) "
             "VALUES (?, ?, 'manual', ?, ?)", (run_id, id, timestamp, row["version"] + 1),
         )
+        # This optimistic bump records a request, not a topic/schedule edit.
+        # Only snapshots still matching the pre-request version may move with
+        # it; earlier genuine edits must continue to invalidate their old runs.
+        connection.execute(
+            "UPDATE subscription_runs SET subscription_version = ? WHERE subscription_id = ? "
+            "AND subscription_version = ? AND status IN ('pending', 'leased', 'awaiting_delivery')",
+            (row["version"] + 1, id, row["version"]),
+        )
         self._save(connection, id, timestamp)
         return run_id

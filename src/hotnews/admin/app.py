@@ -13,6 +13,7 @@ from urllib.parse import parse_qsl, urlsplit
 from ..commands.schema import nonempty_string, object_fields, parse_json, parse_schedule, positive_integer
 from ..config import AppConfig
 from ..domain import HttpResponse, Subscription, ValidationError, VersionConflict
+from ..http import ContentLengthError, bounded_content_length
 from ..storage.database import Database
 from ..storage.events import _utc_text
 from ..storage.subscriptions import SubscriptionRepository
@@ -186,11 +187,10 @@ class AdminApplication:
                 return _json_response(413, {"error": "body_too_large"})
             declared = lowered.get("content-length")
             if declared is not None:
-                if not re.fullmatch(r"[0-9]+", declared):
-                    raise ValidationError("invalid request framing")
-                length = int(declared)
-                if length > self.max_body_bytes:
-                    return _json_response(413, {"error": "body_too_large"})
+                try:
+                    length = bounded_content_length(declared, self.max_body_bytes)
+                except ContentLengthError as error:
+                    return _json_response(error.status, {"error": "body_too_large" if error.status == 413 else "invalid_request"})
                 if length != len(body):
                     raise ValidationError("invalid request framing")
             if "transfer-encoding" in lowered:
