@@ -1,4 +1,4 @@
-"""One full callback → commands → research → confirmed send acceptance flow."""
+"""One full long-connection event → research → confirmed send acceptance flow."""
 
 from datetime import datetime, timedelta, timezone
 import json
@@ -11,7 +11,7 @@ from hotnews.commands.service import CommandService
 from hotnews.config import AppConfig
 from hotnews.domain import NewsResult
 from hotnews.feishu.client import FeishuClient
-from hotnews.feishu.gateway import GatewayApplication
+from hotnews.feishu.intake import EventIntake
 from hotnews.runtime import OutboxWorker
 from hotnews.storage.database import Database
 from hotnews.storage.events import EventRepository
@@ -27,7 +27,7 @@ class HotNewsAcceptanceTests(unittest.TestCase):
             app_config = AppConfig(database_path=str(Path(directory) / "pipeline.db"))
             database = Database(app_config.database_path)
             database.migrate()
-            gateway = GatewayApplication(app_config, config(), database)
+            intake = EventIntake(database, "ou_bot")
             events = EventRepository(database)
             subscriptions = SubscriptionRepository(database)
             runs = RunRepository(database)
@@ -39,16 +39,19 @@ class HotNewsAcceptanceTests(unittest.TestCase):
                 payload["header"]["event_id"] = "evt_%d" % number
                 payload["event"]["message"]["message_id"] = "om_%d" % number
                 payload["event"]["sender"]["sender_id"]["open_id"] = sender
-                body = json.dumps(payload).encode()
-                headers = {"Content-Type": "application/json"}
-                self.assertEqual(gateway.handle("POST", "/callbacks/feishu", headers, body).status, 200)
-                self.assertEqual(gateway.handle("POST", "/callbacks/feishu", headers, body).status, 200)
+                self.assertTrue(intake.handle(payload))
+                self.assertTrue(intake.handle(payload))
                 claimed = events.claim_pending("research", 20, now, 900)
                 self.assertEqual(len(claimed), 1)
                 return commands.apply(claimed[0].event_id, "research", parse_intent(intent))
 
             first = command(1, {"action": "create_subscription", "topic": "AI", "keywords": ["AI"],
                                 "search_terms": ["AI", "artificial intelligence"]}).subscription
+            ignored = message_event()
+            ignored["header"]["event_id"] = "evt_unmentioned"
+            ignored["event"]["message"].update(message_id="om_unmentioned", mentions=[])
+            self.assertTrue(intake.handle(ignored))
+            self.assertEqual(len(events.claim_pending("ignored-check", 20, now, 900)), 0)
             second = command(2, {"action": "create_subscription", "topic": "能源", "keywords": ["能源"],
                                  "search_terms": ["能源", "energy"],
                                  "schedule": {"kind": "interval", "interval_minutes": 120}}).subscription

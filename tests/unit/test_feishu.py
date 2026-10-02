@@ -1,7 +1,5 @@
 """Feishu protocol fixtures follow the official v2 event and HTTP shapes."""
 
-import base64
-import hashlib
 import io
 import json
 import unittest
@@ -12,24 +10,19 @@ from http.client import IncompleteRead
 from unittest.mock import patch
 from urllib.response import addinfourl
 
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
 from hotnews.config import FeishuConfig
 from hotnews.domain import HttpResponse, NewsResult, Schedule, Subscription, ValidationError
 from hotnews.feishu.cards import render_command_result, render_digest
 from hotnews.feishu.client import FeishuAPIError, FeishuClient
-from hotnews.feishu.crypto import decrypt_payload, verify_signature
-from hotnews.feishu.events import decode_callback, decode_request, normalize_event, url_verification_response
+from hotnews.feishu.events import normalize_event
 from hotnews.http import UrllibTransport
 
 
 NOW = datetime(2026, 10, 2, 2, 0, tzinfo=timezone.utc)
 
 
-def config(encrypted=False, bot_open_id="ou_bot"):
-    return FeishuConfig("cli_test", "test-app-secret", "test-verification-token",
-                        "test-encrypt-key" if encrypted else None, bot_open_id)
+def config(bot_open_id="ou_bot"):
+    return FeishuConfig("cli_test", "test-app-secret", bot_open_id=bot_open_id)
 
 
 def message_event():
@@ -55,26 +48,6 @@ def message_event():
             },
         },
     }
-
-
-def encrypt_bytes(plaintext):
-    """Independent encoder: Feishu IV prefix, SHA256 key, 16-byte PKCS#7."""
-    iv = bytes(range(16))
-    pad_size = 16 - len(plaintext) % 16
-    padded = plaintext + bytes([pad_size]) * pad_size
-    key = hashlib.sha256(b"test-encrypt-key").digest()
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend()).encryptor()
-    return base64.b64encode(iv + cipher.update(padded) + cipher.finalize()).decode("ascii")
-
-
-def encrypted_payload(payload):
-    return {"encrypt": encrypt_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"))}
-
-
-def signed_headers(body):
-    return {"X-Lark-Request-Timestamp": "1790906400", "X-Lark-Request-Nonce": "nonce-test",
-            "X-Lark-Signature": hashlib.sha256(
-                b"1790906400nonce-testtest-encrypt-key" + body).hexdigest()}
 
 
 def response(payload, status=200, headers=None):
@@ -126,7 +99,7 @@ class FeishuEventTests(unittest.TestCase):
 
     def test_group_text_mention_becomes_normalized_event(self):
         before = datetime.now(timezone.utc)
-        event = normalize_event(message_event(), config())
+        event = normalize_event(message_event(), "ou_bot")
         self.assertEqual((event.event_id, event.message_id, event.chat_id, event.sender_id, event.text),
                          ("evt_1", "om_1", "oc_group", "ou_member", "订阅 AI，每天 9 点"))
         self.assertLessEqual(before, event.received_at)
@@ -137,30 +110,30 @@ class FeishuEventTests(unittest.TestCase):
             payload = message_event()
             payload["event"]["message"][field] = value
             with self.subTest(field=field):
-                self.assertIsNone(normalize_event(payload, config()))
+                self.assertIsNone(normalize_event(payload, "ou_bot"))
         for sender_type in ("app", "bot", ""):
             payload = message_event()
             payload["event"]["sender"]["sender_type"] = sender_type
             with self.subTest(sender_type=sender_type):
-                self.assertIsNone(normalize_event(payload, config()))
+                self.assertIsNone(normalize_event(payload, "ou_bot"))
 
     def test_self_open_id_is_ignored_even_with_user_sender_type(self):
         payload = message_event()
         payload["event"]["sender"]["sender_id"]["open_id"] = "ou_bot"
-        self.assertIsNone(normalize_event(payload, config()))
+        self.assertIsNone(normalize_event(payload, "ou_bot"))
 
     def test_literal_bot_name_does_not_replace_structural_mention(self):
         payload = message_event()
         payload["event"]["message"].update(content='{"text":"@热点机器人 帮助"}', mentions=[])
-        self.assertIsNone(normalize_event(payload, config()))
+        self.assertIsNone(normalize_event(payload, "ou_bot"))
 
     def test_missing_or_wrong_bot_identity_fails_closed(self):
         for bot_open_id in (None, "", "ou_other"):
             with self.subTest(bot_open_id=bot_open_id):
-                self.assertIsNone(normalize_event(message_event(), config(bot_open_id=bot_open_id)))
+                self.assertIsNone(normalize_event(message_event(), bot_open_id))
         payload = message_event()
         payload["event"]["message"]["mentions"][0]["id"]["open_id"] = "ou_other"
-        self.assertIsNone(normalize_event(payload, config()))
+        self.assertIsNone(normalize_event(payload, "ou_bot"))
 
     def test_removes_only_this_bots_mentions_and_keeps_other_words(self):
         payload = message_event()
@@ -168,33 +141,20 @@ class FeishuEventTests(unittest.TestCase):
         message["content"] = json.dumps({"text": "@_user_1 订阅  AI\n问 @_user_10，@热点机器人 @_user_1"})
         message["mentions"].append({"key": "@_user_10", "id": {"open_id": "ou_other"},
                                     "name": "Other", "tenant_key": "tenant_test"})
-        self.assertEqual(normalize_event(payload, config()).text,
+        self.assertEqual(normalize_event(payload, "ou_bot").text,
                          "订阅  AI\n问 @_user_10，@热点机器人")
 
     def test_empty_body_after_removing_mentions_is_ignored(self):
         payload = message_event()
         payload["event"]["message"]["content"] = '{"text":" @_user_1 "}'
-        self.assertIsNone(normalize_event(payload, config()))
+        self.assertIsNone(normalize_event(payload, "ou_bot"))
 
     def test_invalid_message_json_and_nonstring_text_are_rejected(self):
         for content in ('{"text":', "[]", '{"text":null}', {"text": "help"}):
             payload = message_event()
             payload["event"]["message"]["content"] = content
             with self.subTest(content=content), self.assertRaises(ValidationError):
-                normalize_event(payload, config())
-
-    def test_bad_token_is_rejected_even_for_ignored_events(self):
-        for supplied in (None, "", "wrong", "非ASCII", "\ud800"):
-            payload = message_event()
-            payload["header"].update(token=supplied, event_type="unsupported")
-            with self.subTest(token=supplied), self.assertRaises(PermissionError):
-                normalize_event(payload, config())
-
-    def test_wrong_app_id_is_rejected(self):
-        payload = message_event()
-        payload["header"]["app_id"] = "cli_someone_else"
-        with self.assertRaises(PermissionError):
-            normalize_event(payload, config())
+                normalize_event(payload, "ou_bot")
 
     def test_missing_required_event_identifiers_are_rejected(self):
         for location, key in (("header", "event_id"), ("message", "message_id"), ("message", "chat_id")):
@@ -202,88 +162,12 @@ class FeishuEventTests(unittest.TestCase):
             part = payload["header"] if location == "header" else payload["event"]["message"]
             part.pop(key)
             with self.subTest(key=key), self.assertRaises(ValidationError):
-                normalize_event(payload, config())
+                normalize_event(payload, "ou_bot")
 
     def test_unrelated_event_is_ignored(self):
         payload = message_event()
         payload["header"]["event_type"] = "im.chat.updated_v1"
-        self.assertIsNone(normalize_event(payload, config()))
-
-    def test_plain_url_verification_checks_token_and_returns_challenge(self):
-        payload = {"type": "url_verification", "token": "test-verification-token", "challenge": 'challenge"\n值'}
-        self.assertEqual(url_verification_response(payload, config()), {"challenge": 'challenge"\n值'})
-        self.assertIsNone(normalize_event(payload, config()))
-        payload["token"] = "wrong"
-        with self.assertRaises(PermissionError):
-            url_verification_response(payload, config())
-
-    def test_encrypted_url_verification_and_message_decode(self):
-        challenge = {"type": "url_verification", "token": "test-verification-token", "challenge": "challenge-test"}
-        self.assertEqual(url_verification_response(encrypted_payload(challenge), config(True)),
-                         {"challenge": "challenge-test"})
-        self.assertEqual(normalize_event(encrypted_payload(message_event()), config(True)).text,
-                         "订阅 AI，每天 9 点")
-
-    def test_encrypted_body_requires_encrypt_key_and_inner_token(self):
-        with self.assertRaises(PermissionError):
-            decode_callback(encrypted_payload(message_event()), config())
-        payload = message_event()
-        payload["header"]["token"] = "wrong"
-        with self.assertRaises(PermissionError):
-            decode_callback(encrypted_payload(payload), config(True))
-
-    def test_callback_rejects_nonobject_and_malformed_structures(self):
-        for payload in (None, [], {"header": []}, {"encrypt": 1}):
-            with self.subTest(payload=payload), self.assertRaises(ValidationError):
-                decode_callback(payload, config(True))
-
-
-class FeishuCryptoTests(unittest.TestCase):
-    def test_decrypt_uses_ciphertext_iv_and_sha256_key(self):
-        self.assertEqual(decrypt_payload(encrypt_bytes(b'{"text":"hello"}'), "test-encrypt-key"),
-                         {"text": "hello"})
-
-    def test_decrypt_rejects_bad_base64_length_padding_and_nonobject_json(self):
-        bad_values = ("not base64!", base64.b64encode(b"short").decode(),
-                      base64.b64encode(bytes(32)).decode(), encrypt_bytes(b"[]"), encrypt_bytes(b"{bad"))
-        for value in bad_values:
-            with self.subTest(value=value), self.assertRaises(ValidationError):
-                decrypt_payload(value, "test-encrypt-key")
-
-    def test_signature_covers_exact_raw_bytes_and_is_case_insensitive_for_header_names(self):
-        body = b'{ "encrypt": "test" }'
-        headers = signed_headers(body)
-        verify_signature(body, {key.lower(): value for key, value in headers.items()}, "test-encrypt-key")
-        with self.assertRaises(PermissionError):
-            verify_signature(b'{"encrypt":"test"}', headers, "test-encrypt-key")
-
-    def test_missing_wrong_or_unicode_signature_is_rejected(self):
-        body = b"{}"
-        for signature in (None, "wrong", "非ASCII", "\ud800"):
-            headers = signed_headers(body)
-            headers["X-Lark-Signature"] = signature
-            with self.subTest(signature=signature), self.assertRaises(PermissionError):
-                verify_signature(body, headers, "test-encrypt-key")
-
-    def test_decode_request_enforces_signature_for_encrypted_events(self):
-        body = json.dumps(encrypted_payload(message_event())).encode()
-        decoded = decode_request(body, signed_headers(body), config(True))
-        self.assertEqual(decoded["header"]["event_id"], "evt_1")
-        with self.assertRaises(PermissionError):
-            decode_request(body, {}, config(True))
-
-    def test_url_verification_does_not_need_signature_but_still_checks_token(self):
-        payload = {"type": "url_verification", "token": "test-verification-token", "challenge": "test"}
-        body = json.dumps(encrypted_payload(payload)).encode()
-        self.assertEqual(decode_request(body, {}, config(True))["challenge"], "test")
-        payload["token"] = "wrong"
-        with self.assertRaises(PermissionError):
-            decode_request(json.dumps(encrypted_payload(payload)).encode(), {}, config(True))
-
-    def test_raw_request_rejects_malformed_json_or_utf8(self):
-        for body in (b"{", b"[]", b"\xff"):
-            with self.subTest(body=body), self.assertRaises(ValidationError):
-                decode_request(body, {}, config())
+        self.assertIsNone(normalize_event(payload, "ou_bot"))
 
 
 class FeishuClientTests(unittest.TestCase):

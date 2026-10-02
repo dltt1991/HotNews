@@ -1,1 +1,1 @@
-"""Local subscription management, isolated from the public callback service."""
+"""Local-only subscription and connection-status management."""

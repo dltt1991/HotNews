@@ -12,9 +12,6 @@ from .domain import ValidationError
 class FeishuConfig:
     app_id: str
     app_secret: str = field(repr=False)
-    # Kept optional until the webhook modules are removed later in the migration.
-    verification_token: str = field(default="", repr=False)
-    encrypt_key: Optional[str] = field(default=None, repr=False)
     bot_open_id: Optional[str] = None
     ws_proxy: Optional[str] = field(default=None, repr=False)
 
@@ -40,7 +37,6 @@ class WorkerConfig:
 @dataclass(frozen=True)
 class AppConfig:
     database_path: str = "data/hotnews.db"
-    callback: ServerConfig = ServerConfig("127.0.0.1", 8080, 1024 * 1024)
     admin: ServerConfig = ServerConfig("127.0.0.1", 8081)
     worker: WorkerConfig = WorkerConfig()
     timezone: str = "Asia/Shanghai"
@@ -94,6 +90,8 @@ def load_config(path: str) -> AppConfig:
     except (OSError, ValueError) as exc:
         raise ValidationError("could not load config: %s" % exc)
     data = _mapping(data, "config")
+    if "callback" in data:
+        raise ValidationError("callback configuration is obsolete; use Feishu long connection")
     database_path = data.get("database_path", "data/hotnews.db")
     timezone = data.get("timezone", "Asia/Shanghai")
     max_results = _positive_int(data.get("max_results", 10), "max_results")
@@ -103,11 +101,9 @@ def load_config(path: str) -> AppConfig:
         raise ValidationError("database_path must be a non-empty string")
     if timezone != "Asia/Shanghai":
         raise ValidationError("timezone must be Asia/Shanghai")
-    callback_default = ServerConfig("127.0.0.1", 8080, 1024 * 1024)
     admin_default = ServerConfig("127.0.0.1", 8081)
     return AppConfig(
         database_path=database_path,
-        callback=_server(data.get("callback"), callback_default, "callback"),
         admin=_server(data.get("admin"), admin_default, "admin"),
         worker=_worker(data.get("worker")),
         timezone=timezone,
@@ -123,11 +119,8 @@ def load_feishu_config(environ: Mapping[str, str]) -> FeishuConfig:
     missing = [name for name in required if not environ.get(name, "").strip()]
     if missing:
         raise ValidationError("missing required Feishu environment variables: %s" % ", ".join(missing))
-    encrypt_key = environ.get("FEISHU_ENCRYPT_KEY") or None
     return FeishuConfig(
         app_id=environ["FEISHU_APP_ID"],
         app_secret=environ["FEISHU_APP_SECRET"],
-        verification_token=environ.get("FEISHU_VERIFICATION_TOKEN", ""),
-        encrypt_key=encrypt_key,
         ws_proxy=resolve_ws_proxy(environ),
     )

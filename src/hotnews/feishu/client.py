@@ -131,7 +131,7 @@ class FeishuClient:
         raise AssertionError("unreachable")
 
     def get_bot_open_id(self) -> str:
-        """Resolve the application's bot identity once before callback startup."""
+        """Resolve the application's bot identity once before connection startup."""
         if isinstance(self._bot_open_id, str) and self._bot_open_id.strip():
             return self._bot_open_id
         payload = self._authenticated("GET", "/bot/v3/info")

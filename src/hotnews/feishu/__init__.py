@@ -1,10 +1,9 @@
-"""Feishu application callback and message adapters."""
+"""Feishu long-connection and message adapters."""
 
 from .cards import render_command_result, render_digest
 from .client import FeishuAPIError, FeishuClient
-from .events import decode_callback, decode_request, normalize_event, url_verification_response
+from .events import normalize_event
 
 __all__ = [
-    "FeishuAPIError", "FeishuClient", "decode_callback", "decode_request",
-    "normalize_event", "render_command_result", "render_digest", "url_verification_response",
+    "FeishuAPIError", "FeishuClient", "normalize_event", "render_command_result", "render_digest",
 ]

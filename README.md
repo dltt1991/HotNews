@@ -1,12 +1,12 @@
 # 飞书热点订阅 Agent
 
-群成员 `@机器人` 创建多条共享订阅，由本机 Codex 搜索国内外资讯、生成中文摘要并定时推送。常驻 Python 服务只负责飞书回调、本机管理页和出站发送；一个每 5 分钟运行的 Codex Scheduled Task 负责理解消息和研究资讯，复用 Codex 的模型与网页搜索，不调用 OpenAI API。
+群成员 `@机器人` 创建多条共享订阅，由本机 Codex 搜索国内外资讯、生成中文摘要并定时推送。常驻 Python 服务通过飞书长连接接收事件，并负责本机管理页和出站发送；一个每 5 分钟运行的 Codex Scheduled Task 负责理解消息和研究资讯，复用 Codex 的模型与网页搜索，不调用 OpenAI API。
 
 默认每天北京时间 09:00；也支持至少 5 分钟的间隔计划。最近 24 小时内容不足时依次查找 7 天、30 天，最多 10 条，旧内容注明日期与“历史补充”。没有合格未推送内容时保持安静。处理延迟通常为 0–5 分钟；机器离线后只补执行一次。
 
 ## 本机运行（推荐）
 
-需要 Python 3.8+、`cryptography>=2.8`，以及保持在线的电脑和 Codex 桌面应用。在项目根目录执行：
+需要 Python 3.8+，以及保持在线的电脑和 Codex 桌面应用。在项目根目录执行：
 
 ```bash
 python3 -m venv .venv
@@ -15,16 +15,29 @@ python3 -m pip install -e .
 cp config.example.json config.json
 ```
 
-配置只包含数据库路径、两个监听地址和运行限制。密钥仅从常驻服务进程的环境变量加载：
+配置只包含数据库路径、本机管理地址和运行限制。密钥仅从常驻服务进程的环境变量加载：
 
 | 变量 | 来源 |
 | --- | --- |
 | `FEISHU_APP_ID` | 飞书自建应用 App ID |
 | `FEISHU_APP_SECRET` | 同一应用的 App Secret |
-| `FEISHU_VERIFICATION_TOKEN` | 事件订阅 Verification Token |
-| `FEISHU_ENCRYPT_KEY` | 可选；启用加密回调时配置的 Encrypt Key |
+| `FEISHU_WS_PROXY` | 可选；仅覆盖长连接及端点发现的代理 |
+| `HTTPS_PROXY` | 可选；标准 HTTPS 代理，也是长连接的第二优先级 |
+| `ALL_PROXY` | 可选；没有 HTTPS 代理时使用，支持 SOCKS5/SOCKS5H |
 
-通过系统服务的受限环境文件或当前终端设置这些值，避免把真实密钥写入项目配置、命令示例或 Codex prompt；Codex 的研究进程不需要这些变量。启动时程序迁移数据库并自动查询机器人的 open ID：
+通过系统服务的受限环境文件或当前终端设置这些值，避免把真实密钥写入项目配置、命令示例或 Codex prompt；Codex 的研究进程不需要这些变量。代理优先级为 `FEISHU_WS_PROXY`、`HTTPS_PROXY`、`https_proxy`、`ALL_PROXY`、`all_proxy`。例如本机代理为：
+
+```bash
+export FEISHU_WS_PROXY=http://127.0.0.1:7890
+```
+
+先执行只读诊断；它验证凭据、机器人身份和一次长连接握手，不发送消息或修改订阅：
+
+```bash
+hotnews --config config.json check-feishu
+```
+
+成功后启动常驻服务：
 
 ```bash
 hotnews --config config.json serve
@@ -32,30 +45,17 @@ hotnews --config config.json serve
 PYTHONPATH=src python3 -m hotnews.cli --config config.json serve
 ```
 
-默认回调监听 `127.0.0.1:8080`，本机管理页为 `http://127.0.0.1:8081/`。`GET /healthz` 返回基本存活状态。两个端口必须不同，管理地址必须为 `127.0.0.1`。SIGINT/SIGTERM 会关闭回调、管理服务和出站工作器；任一后台服务异常会终止整体服务并返回非零退出码。可由操作系统服务管理器自动重启。
+应用不监听飞书事件端口。本机管理页为 `http://127.0.0.1:8081/`，且管理地址必须保持为 `127.0.0.1`。SIGINT/SIGTERM 会关闭长连接、管理服务和出站工作器；任一后台服务发生致命异常会终止整体服务并返回非零退出码。代理或网络短暂中断时长连接自动重试，管理页会显示当前连接状态。
 
 管理页可查看、筛选、编辑、暂停/恢复、立即推送或取消订阅。创建入口只在飞书群。关键词修改会立即清除旧扩展词并显示“等待 Codex 更新搜索词”；下一轮任务更新后恢复可研究状态。编辑不自动推送；暂停后立即推送不恢复定时计划。页面使用 version 防止两标签页互相覆盖，冲突时要求刷新。
 
 取消会在同一事务中停止尚未领取发送的摘要、其研究运行和待投递记录，不影响确认回复或其他订阅。工作器已取得有效发送租约的消息可能已跨过网络边界，不能保证撤回；若飞书随后确认成功，仍保留事实投递历史，但不会覆盖已取消的订阅状态。未确认的取消后消息不会被再次领取发送。
 
-## 飞书应用与公网回调
+## 飞书应用与长连接
 
 在飞书开放平台创建企业自建应用，启用机器人能力，申请 `im:message.group_at_msg`（接收群聊中 @机器人 消息）及 `im:message:send_as_bot`（以应用身份发消息）；控制台若使用兼容的 `im:message` 权限，按[发送消息文档](https://open.feishu.cn/document/server-docs/im-v1/message/create)确认所需授权。订阅 `im.message.receive_v1`，发布并安装应用，将机器人加入测试群。接收范围说明见[飞书权限说明](https://open.feishu.cn/solutions/detail/ticket?lang=zh-CN)。
 
-将事件订阅请求地址设为 `https://你的回调域名/callbacks/feishu`。启用加密时保持后台 Encrypt Key 与服务环境一致；配置 Verification Token 后由程序响应 URL verification。
-
-公网 HTTPS 使用 Cloudflare Tunnel 或反向代理，只转发回调监听端口 8080。Tunnel 的该域名映射到 `http://127.0.0.1:8080`，其他规则设为 404，不能指向 8081。Nginx 的核心路由可写为：
-
-```nginx
-location = /callbacks/feishu {
-    proxy_pass http://127.0.0.1:8080;
-    client_max_body_size 1m;
-    proxy_read_timeout 15s;
-}
-location / { return 404; }
-```
-
-TLS、域名及 Tunnel 本身由操作者配置。即使使用反向代理，管理页仍只在本机访问，不能合并到公网域名下。
+进入“事件与回调 → 事件配置”，选择 **使用长连接接收事件**，添加事件 `im.message.receive_v1`，保存并发布应用。长连接模式不需要公网域名、请求地址或内网穿透。应用发布并由管理员安装后，将机器人加入目标群。
 
 群内任何成员可使用：
 
@@ -119,13 +119,13 @@ python3 -m compileall -q src tests
 PYTHONPATH=src python3 -m hotnews.cli --help
 ```
 
-自动化覆盖回调鉴权/幂等、共享订阅、调度、租约、版本冲突、搜索结果验证、消息重试与原子确认、本机 API 和页面行为。外部 HTTP 被替换，不联系真实飞书或搜索网站。真实浏览器布局、测试群收发和无人值守 Codex 调度仍需操作者验收，尚未以自动测试证明。
+自动化覆盖长连接事件幂等、共享订阅、调度、租约、版本冲突、搜索结果验证、消息重试与原子确认、本机 API 和页面行为。外部网络被替换，不联系真实飞书或搜索网站。真实浏览器布局、测试群收发和无人值守 Codex 调度仍需操作者验收，尚未以自动测试证明。
 
-首次上线按[设计规格 §12.2](docs/superpowers/specs/2026-10-02-feishu-hotnews-agent-design.md)逐项验收：两条订阅、另一成员立即执行、国内外来源/日期/历史标记、事件重放、重启恢复、取消不影响其他订阅、发送失败重试、dry-run 不写成功历史、后台关键词/时间修改与词更新、暂停/恢复、两标签页 409，以及公网域名无法访问管理页。没有真实凭据的开发环境不会将这些手工项目标为通过。
+首次上线按[设计规格 §12.2](docs/superpowers/specs/2026-10-02-feishu-hotnews-agent-design.md)逐项验收：两条订阅、另一成员立即执行、国内外来源/日期/历史标记、事件重放、重启恢复、取消不影响其他订阅、发送失败重试、dry-run 不写成功历史、后台关键词/时间修改与词更新、暂停/恢复和两标签页 409。没有真实凭据的开发环境不会将这些手工项目标为通过。
 
 ## 容器可选部署
 
-优先本机运行以使用管理页；容器默认只发布回调。复制配置后将 `callback.host` 改为 `0.0.0.0`（容器内部），仍保持 `admin.host` 为 `127.0.0.1`。镜像默认以非 root 的数字用户 `1000:1000` 运行；Compose 可覆盖为运行宿主机 Codex 的普通用户，避免两者产生无法互写的 SQLite/WAL 文件。以该普通用户预先创建挂载目录及数据库文件、确认所有者后启动：
+优先本机运行以直接使用管理页。容器不发布端口；长连接只需要出站网络，容器内绑定 `127.0.0.1` 的管理页也不会暴露到宿主机。镜像默认以非 root 的数字用户 `1000:1000` 运行；Compose 可覆盖为运行宿主机 Codex 的普通用户，避免两者产生无法互写的 SQLite/WAL 文件。以该普通用户预先创建挂载目录及数据库文件、确认所有者后启动：
 
 ```bash
 export HOTNEWS_UID="$(id -u)"
@@ -143,9 +143,8 @@ docker compose up -d --build
 ```bash
 docker build -t hotnews .
 docker run --rm --user "$HOTNEWS_UID:$HOTNEWS_GID" \
-  -e FEISHU_APP_ID -e FEISHU_APP_SECRET -e FEISHU_VERIFICATION_TOKEN -e FEISHU_ENCRYPT_KEY \
-  -p 127.0.0.1:8080:8080 \
+  -e FEISHU_APP_ID -e FEISHU_APP_SECRET -e FEISHU_WS_PROXY -e HTTPS_PROXY -e ALL_PROXY \
   -v "$PWD/config.json:/app/config.json:ro" -v "$PWD/data:/app/data" hotnews
 ```
 
-Compose 从运行环境读取四个飞书变量，将 `./data` 持久化到 `/app/data`，仅映射宿主机 `127.0.0.1:8080`。Dockerfile 仅 EXPOSE 8080，8081 不发布；容器内的管理页不会直接出现在宿主机浏览器。Codex 仍运行在宿主机本地项目，必须读取同一个挂载目录下的数据库，且宿主机配置的 database_path 指向该 `data/hotnews.db`。公网 Tunnel/反向代理只连接宿主机回调端口。
+Compose 从运行环境读取飞书凭据和代理变量，并将 `./data` 持久化到 `/app/data`。Codex 仍运行在宿主机本地项目，必须读取同一个挂载目录下的数据库，且宿主机配置的 `database_path` 指向该 `data/hotnews.db`。个人使用时推荐直接在宿主机运行服务，便于访问本机管理页面。

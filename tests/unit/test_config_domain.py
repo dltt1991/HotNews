@@ -37,13 +37,17 @@ class ConfigDomainTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             load_feishu_config({"FEISHU_APP_ID": "app"})
 
-    def test_callback_secrets_are_not_required_for_long_connection(self):
+    def test_only_long_connection_credentials_are_loaded(self):
         feishu = load_feishu_config({
             "FEISHU_APP_ID": "app",
             "FEISHU_APP_SECRET": "secret",
+            "FEISHU_VERIFICATION_TOKEN": "obsolete-token",
+            "FEISHU_ENCRYPT_KEY": "obsolete-key",
         })
         self.assertEqual((feishu.app_id, feishu.app_secret, feishu.ws_proxy),
                          ("app", "secret", None))
+        self.assertFalse(hasattr(feishu, "verification_token"))
+        self.assertFalse(hasattr(feishu, "encrypt_key"))
 
     def test_agent_config_load_does_not_read_secrets(self):
         path = self.write_config({"database_path": "state.sqlite"})
@@ -52,14 +56,12 @@ class ConfigDomainTests(unittest.TestCase):
         self.assertFalse(hasattr(config, "app_secret"))
         self.assertFalse(hasattr(config, "verification_token"))
 
-    def test_default_ports_timezone_and_operational_limits(self):
-        self.assertEqual(AppConfig().callback.max_body_bytes, 1024 * 1024)
+    def test_default_admin_timezone_and_operational_limits(self):
         config = load_config(self.write_config({}))
-        self.assertEqual((config.callback.host, config.callback.port), ("127.0.0.1", 8080))
+        self.assertFalse(hasattr(config, "callback"))
         self.assertEqual((config.admin.host, config.admin.port), ("127.0.0.1", 8081))
         self.assertEqual(config.timezone, "Asia/Shanghai")
         self.assertEqual(config.max_results, 10)
-        self.assertEqual(config.callback.max_body_bytes, 1024 * 1024)
         self.assertEqual(config.worker.max_queued_events, 20)
         self.assertEqual(config.worker.max_due_subscriptions, 3)
         self.assertEqual(config.worker.lease_seconds, 15 * 60)
@@ -70,6 +72,10 @@ class ConfigDomainTests(unittest.TestCase):
         self.assertEqual(load_config(self.write_config({"max_results": 7})).max_results, 7)
         with self.assertRaises(ValidationError):
             load_config(self.write_config({"max_results": 11}))
+
+    def test_obsolete_callback_config_is_rejected_with_migration_error(self):
+        with self.assertRaisesRegex(ValidationError, "long connection"):
+            load_config(self.write_config({"callback": {"port": 8080}}))
 
     def make_subscription(self, topic="AI", keywords=("AI",)):
         now = datetime(2026, 10, 2, tzinfo=timezone.utc)

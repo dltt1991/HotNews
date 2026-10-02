@@ -75,7 +75,7 @@ class WorkerTests(unittest.TestCase):
     def worker(self, transport=None, config=None):
         from hotnews.runtime import OutboxWorker
         transport = transport or Transport()
-        client = FeishuClient(FeishuConfig("app", SECRET, "verification"), transport)
+        client = FeishuClient(FeishuConfig("app", SECRET), transport)
         return OutboxWorker(config or self.config, client, clock=lambda: 0), transport
 
     def rows(self, table):
@@ -305,7 +305,7 @@ class WorkerTests(unittest.TestCase):
                 return super().request(method, url, headers, body, timeout)
 
         transport = SlowTransport()
-        client = FeishuClient(FeishuConfig("app", SECRET, "v"), transport)
+        client = FeishuClient(FeishuConfig("app", SECRET), transport)
         worker = OutboxWorker(self.config, client, clock=lambda: elapsed[0])
         worker.run_once(NOW)
         self.assertEqual(self.subscriptions.get(first.id).last_success_at, NOW + timedelta(seconds=120))
@@ -498,61 +498,54 @@ class ServiceTests(unittest.TestCase):
     def test_excessive_content_length_returns_413_and_servers_keep_running(self):
         from hotnews.admin import server as admin_server
         from hotnews.admin.app import AdminApplication
-        from hotnews.feishu import gateway
-        from tests.integration.test_gateway import MemorySocket
-        from tests.unit.test_feishu import config as feishu_config
-        for module in (admin_server, gateway):
-            with self.subTest(service=module.__name__), tempfile.TemporaryDirectory() as directory:
-                settings = AppConfig(database_path=str(Path(directory) / "framing.db"))
-                database = Database(settings.database_path)
-                database.migrate()
-                app = (gateway.GatewayApplication(settings, feishu_config(), database) if module is gateway
-                       else AdminApplication(settings, SubscriptionRepository(database)))
-                route = "/callbacks/feishu" if module is gateway else "/api/session"
-                method = "POST" if module is gateway else "GET"
-                huge = "9" * 5000
-                headers = {"Host": "127.0.0.1:8081", "Content-Type": "application/json", "Content-Length": huge}
-                stop = threading.Event()
-                seen = []
+        from tests.unit.test_admin_api import MemorySocket
+        with tempfile.TemporaryDirectory() as directory:
+            settings = AppConfig(database_path=str(Path(directory) / "framing.db"))
+            database = Database(settings.database_path)
+            database.migrate()
+            app = AdminApplication(settings, SubscriptionRepository(database))
+            route = "/api/session"
+            method = "GET"
+            huge = "9" * 5000
+            headers = {"Host": "127.0.0.1:8081", "Content-Type": "application/json", "Content-Length": huge}
+            stop = threading.Event()
+            seen = []
 
-                class ServerBoundary:
-                    def __init__(inner, address, handler):
-                        inner.handler = handler
-                    def __enter__(inner):
-                        return inner
-                    def __exit__(inner, *args):
-                        pass
-                    def handle_request(inner):
-                        # Emulate Python 3.11's digit-conversion limit on the
-                        # current Python 3.8 host without mocking safe small ints.
-                        original_int = int
-                        def limited_int(value, *args):
-                            if isinstance(value, str) and len(value) > 4300:
-                                raise ValueError("Exceeds integer string conversion limit")
-                            return original_int(value, *args)
-                        request = ("%s %s HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nContent-Type: application/json\r\n"
-                                   "Content-Length: %s\r\n\r\n" % (method, route, huge)).encode()
-                        socket = MemorySocket(request)
-                        with patch.object(module, "int", limited_int, create=True), \
-                             patch.object(gateway, "int", limited_int, create=True), \
-                             patch("hotnews.http.int", limited_int, create=True), \
-                             patch("hotnews.admin.app.int", limited_int, create=True):
-                            try:
-                                inner.handler(socket, ("127.0.0.1", 1234), inner)
-                            except Exception:
-                                inner.handle_error(None, ("127.0.0.1", 1234))
-                        seen.append(bytes(socket.outgoing))
-                        seen.append(stop.is_set())
-                        stop.set()
+            class ServerBoundary:
+                def __init__(inner, address, handler):
+                    inner.handler = handler
+                def __enter__(inner):
+                    return inner
+                def __exit__(inner, *args):
+                    pass
+                def handle_request(inner):
+                    # Emulate Python 3.11's digit-conversion limit on the
+                    # current Python 3.8 host without mocking safe small ints.
+                    original_int = int
+                    def limited_int(value, *args):
+                        if isinstance(value, str) and len(value) > 4300:
+                            raise ValueError("Exceeds integer string conversion limit")
+                        return original_int(value, *args)
+                    request = ("%s %s HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nContent-Type: application/json\r\n"
+                               "Content-Length: %s\r\n\r\n" % (method, route, huge)).encode()
+                    socket = MemorySocket(request)
+                    with patch.object(admin_server, "int", limited_int, create=True), \
+                         patch("hotnews.http.int", limited_int, create=True), \
+                         patch("hotnews.admin.app.int", limited_int, create=True):
+                        try:
+                            inner.handler(socket, ("127.0.0.1", 1234), inner)
+                        except Exception:
+                            inner.handle_error(None, ("127.0.0.1", 1234))
+                    seen.append(bytes(socket.outgoing))
+                    seen.append(stop.is_set())
+                    stop.set()
 
-                with patch.object(module, "ThreadingHTTPServer", ServerBoundary):
-                    if module is gateway:
-                        module.serve_gateway(settings, stop, feishu_config())
-                    else:
-                        module.serve_admin(settings, stop)
-                self.assertIn(b"413 Request Entity Too Large", seen[0])
-                self.assertFalse(seen[1])
-                self.assertEqual(app.handle(method, route, headers, b"").status, 413)
+            with patch.object(admin_server, "ThreadingHTTPServer", ServerBoundary):
+                admin_server.serve_admin(settings, stop)
+            self.assertIn(b"413 Request Entity Too Large", seen[0])
+            self.assertFalse(seen[1])
+            self.assertEqual(app.handle(method, route, headers, b"").status, 413)
+
     def test_http_client_disconnect_does_not_stop_or_dump_request_errors(self):
         from hotnews.http import supervise_request_errors
         stop = threading.Event()
@@ -570,10 +563,8 @@ class ServiceTests(unittest.TestCase):
 
     def test_unexpected_http_request_thread_error_is_safe_and_stops_its_server(self):
         from hotnews.admin import server as admin_server
-        from hotnews.feishu import gateway
-        for module, error_type in ((admin_server, RuntimeError), (gateway, RuntimeError),
-                                   (admin_server, OSError), (gateway, OSError)):
-            with self.subTest(service=module.__name__, error=error_type), tempfile.TemporaryDirectory() as directory:
+        for error_type in (RuntimeError, OSError):
+            with self.subTest(error=error_type), tempfile.TemporaryDirectory() as directory:
                 stop = threading.Event()
                 observed = {}
 
@@ -596,12 +587,9 @@ class ServiceTests(unittest.TestCase):
                         stop.set()
 
                 config = AppConfig(database_path=str(Path(directory) / "http.db"))
-                with patch.object(module, "ThreadingHTTPServer", ServerBoundary):
+                with patch.object(admin_server, "ThreadingHTTPServer", ServerBoundary):
                     try:
-                        if module is gateway:
-                            module.serve_gateway(config, stop, FeishuConfig("app", SECRET, "v", bot_open_id="ou_bot"))
-                        else:
-                            module.serve_admin(config, stop)
+                        admin_server.serve_admin(config, stop)
                     except RuntimeError as error:
                         self.assertNotIn(SECRET, str(error))
                     else:

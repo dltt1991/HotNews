@@ -6,11 +6,10 @@ services:
     environment:
       FEISHU_APP_ID: ${FEISHU_APP_ID:?set FEISHU_APP_ID}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:?set FEISHU_APP_SECRET}
-      FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:?set FEISHU_VERIFICATION_TOKEN}
-      FEISHU_ENCRYPT_KEY: ${FEISHU_ENCRYPT_KEY:-}
+      FEISHU_WS_PROXY: ${FEISHU_WS_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
       TZ: Asia/Shanghai
-    ports:
-      - "127.0.0.1:8080:8080"
     volumes:
       - ./config.json:/app/config.json:ro
       - ./data:/app/data
