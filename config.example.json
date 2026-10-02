@@ -1,43 +1,23 @@
 {
-  "database": "data/hotnews.db",
-  "scheduler": {"poll_seconds": 30},
-  "sources": [
-    {
-      "name": "Hacker News",
-      "type": "hackernews",
-      "limit": 30
-    },
-    {
-      "name": "少数派",
-      "type": "rss",
-      "url": "https://sspai.com/feed",
-      "limit": 20
-    }
-  ],
-  "subscriptions": [
-    {
-      "name": "ai-digest",
-      "title": "AI 热点日报",
-      "sources": ["Hacker News", "少数派"],
-      "keywords": ["AI", "LLM", "人工智能", "大模型", "Agent"],
-      "exclude_keywords": ["招聘"],
-      "min_score": 0,
-      "max_items": 10,
-      "schedule": {"type": "daily", "at": "09:00"},
-      "channels": [
-        {
-          "name": "feishu-main",
-          "type": "feishu",
-          "webhook": "${FEISHU_WEBHOOK}",
-          "secret": "${FEISHU_SECRET}"
-        },
-        {
-          "name": "wecom-main",
-          "type": "wecom",
-          "webhook": "${WECOM_WEBHOOK}"
-        }
-      ]
-    }
-  ]
+  "database_path": "data/hotnews.db",
+  "callback": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "max_body_bytes": 1048576
+  },
+  "admin": {
+    "host": "127.0.0.1",
+    "port": 8081
+  },
+  "timezone": "Asia/Shanghai",
+  "max_results": 10,
+  "worker": {
+    "max_queued_events": 20,
+    "max_due_subscriptions": 3,
+    "lease_seconds": 900,
+    "soft_budget_seconds": 240,
+    "outbox_max_attempts": 5,
+    "outbox_backoff_seconds": 10,
+    "outbox_backoff_max_seconds": 300
+  }
 }
-

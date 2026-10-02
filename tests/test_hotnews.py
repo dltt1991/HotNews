@@ -1,5 +1,3 @@
-import json
-import os
 import tempfile
 import unittest
 from datetime import datetime
@@ -7,7 +5,6 @@ from unittest.mock import patch
 
 from hotnews.agent import HotNewsAgent, _matches
 from hotnews.channels import render_markdown
-from hotnews.config import load_config
 from hotnews.models import NewsItem
 from hotnews.scheduler import _due
 
@@ -17,14 +14,6 @@ class HotNewsTests(unittest.TestCase):
         item = NewsItem("test", "A new LLM agent", "https://example.com", score=12)
         self.assertTrue(_matches(item, {"keywords": ["llm"], "min_score": 10}))
         self.assertFalse(_matches(item, {"keywords": ["llm"], "exclude_keywords": ["agent"]}))
-
-    def test_environment_expansion(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as handle:
-            json.dump({"sources": [{"name": "x"}], "subscriptions": [{"name": "y"}],
-                       "value": "${HOTNEWS_TEST}"}, handle)
-            handle.flush()
-            with patch.dict(os.environ, {"HOTNEWS_TEST": "resolved"}):
-                self.assertEqual(load_config(handle.name)["value"], "resolved")
 
     def test_markdown(self):
         text = render_markdown("日报", [NewsItem("source", "title", "https://example.com")])
@@ -56,4 +45,3 @@ class HotNewsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
