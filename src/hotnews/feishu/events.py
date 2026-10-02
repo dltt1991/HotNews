@@ -62,7 +62,7 @@ def decode_request(raw_body: bytes, headers: Mapping[str, str], config: FeishuCo
     """
     try:
         payload = json.loads(raw_body.decode("utf-8"))
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, RecursionError):
         raise ValidationError("invalid Feishu callback JSON") from None
     decoded = decode_callback(payload, config)
     if config.encrypt_key and decoded.get("type") != "url_verification":
@@ -118,7 +118,7 @@ def normalize_event(payload: dict, config: FeishuConfig) -> Optional[NormalizedE
         raise ValidationError("message content must be a JSON string")
     try:
         content = json.loads(content)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ValidationError("invalid Feishu message content JSON") from None
     content = _object(content, "message content")
     text = content.get("text")

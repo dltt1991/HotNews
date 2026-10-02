@@ -32,7 +32,7 @@ def decrypt_payload(encrypted: str, encrypt_key: str) -> dict:
         if not isinstance(payload, dict):
             raise ValueError("callback must be an object")
         return payload
-    except (ValueError, UnicodeError, binascii.Error):
+    except (ValueError, UnicodeError, binascii.Error, RecursionError):
         raise ValidationError("invalid encrypted Feishu callback") from None
 
 

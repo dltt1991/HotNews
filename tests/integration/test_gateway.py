@@ -21,7 +21,7 @@ from hotnews.feishu.gateway import GatewayApplication
 from hotnews.storage.database import Database
 from hotnews.storage.events import EventRepository
 from hotnews.storage.outbox import OutboxRepository
-from tests.unit.test_feishu import (ScriptedTransport, config, encrypted_payload, message_event,
+from tests.unit.test_feishu import (ScriptedTransport, config, encrypt_bytes, encrypted_payload, message_event,
                                     response, signed_headers, token)
 
 
@@ -224,6 +224,23 @@ class GatewayTests(unittest.TestCase):
         malformed["event"]["message"]["content"] = "{"
         self.assertEqual(self.request(malformed).status, 400)
         self.assert_empty_queues()
+
+    def test_deeply_nested_callback_json_returns_bad_request_without_queueing(self):
+        nested = b"[" * 1100 + b"0" + b"]" * 1100
+        raw = b'{"nested":' + nested + b"}"
+        message = message_event()
+        message["event"]["message"]["content"] = (b'{"text":' + nested + b"}").decode()
+        encrypted = json.dumps({"encrypt": encrypt_bytes(raw)}).encode()
+        cases = ((self.app, raw, JSON_HEADERS),
+                 (self.app, json.dumps(message).encode(), JSON_HEADERS),
+                 (GatewayApplication(self.settings, config(True), self.database), encrypted,
+                  {**JSON_HEADERS, **signed_headers(encrypted)}))
+        for app, body, headers in cases:
+            with self.subTest(encrypted=app.feishu_config.encrypt_key is not None):
+                response = app.handle("POST", "/callbacks/feishu", headers, body)
+                self.assertEqual(response.status, 400)
+                self.assertEqual(json.loads(response.body), {"error": "invalid callback"})
+                self.assert_empty_queues()
 
     def test_non_json_numeric_value_in_mentions_cannot_create_a_partial_ack(self):
         payload = message_event()
