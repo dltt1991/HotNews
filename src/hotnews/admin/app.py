@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import hmac
 import json
+import pkgutil
 import re
 import secrets
 import sqlite3
@@ -19,6 +20,26 @@ from ..storage.subscriptions import SubscriptionRepository
 
 _STATES = {"ready", "search_terms_pending", "paused", "cancelled"}
 _DEFAULT_MAX_BODY_BYTES = 64 * 1024
+_STATIC = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/static/styles.css": ("styles.css", "text/css; charset=utf-8"),
+}
+
+
+def _static_response(route: str) -> HttpResponse:
+    name, content_type = _STATIC[route]
+    body = pkgutil.get_data("hotnews.admin", "static/" + name)
+    if body is None:
+        return _json_response(500, {"error": "resource_unavailable"})
+    return HttpResponse(200, {
+        "Content-Type": content_type, "Content-Length": str(len(body)),
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; "
+                                   "connect-src 'self'; base-uri 'none'; object-src 'none'; "
+                                   "frame-ancestors 'none'; form-action 'self'",
+        "Referrer-Policy": "no-referrer",
+    }, body)
 
 
 def _json_response(status: int, value: dict, headers: Optional[dict] = None) -> HttpResponse:
@@ -151,7 +172,7 @@ class AdminApplication:
                 raise ValidationError("invalid route")
             route = parsed.path
             subscription_id, action = None, None
-            if route in ("/api/session", "/api/subscriptions"):
+            if route in _STATIC or route in ("/api/session", "/api/subscriptions"):
                 allowed = "GET"
             else:
                 match = re.fullmatch(r"/api/subscriptions/([^/]+)(?:/(pause|resume|run-now))?", route)
@@ -174,6 +195,10 @@ class AdminApplication:
                     raise ValidationError("invalid request framing")
             if "transfer-encoding" in lowered:
                 raise ValidationError("unsupported request framing")
+            if route in _STATIC:
+                if parsed.query:
+                    raise ValidationError("static routes do not accept filters")
+                return _static_response(route)
             if method != "GET":
                 if (lowered.get("origin") != "http://" + authority
                         or not hmac.compare_digest(lowered.get("x-hotnews-csrf", "").encode("utf-8"),

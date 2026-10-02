@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>热点订阅 · 本机管理</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <header class="page-header">
+    <p class="eyebrow">HOTNEWS / FEISHU</p>
+    <h1>热点订阅</h1>
+    <p>查看与调整飞书群订阅。新增订阅请在群内 @机器人。所有时间均为北京时间。</p>
+  </header>
+  <main>
+    <section aria-label="订阅筛选" class="panel">
+      <form id="filters" class="filters">
+        <div><label for="filter-chat">飞书群</label><select id="filter-chat"><option value="">全部群</option></select></div>
+        <div><label for="filter-state">订阅状态</label><select id="filter-state">
+          <option value="">全部状态</option><option value="ready">已启用</option>
+          <option value="search_terms_pending">等待搜索词</option><option value="paused">已暂停</option>
+          <option value="cancelled">已取消</option>
+        </select></div>
+        <div class="filter-keyword"><label for="filter-keyword">主题或关键词</label><input id="filter-keyword" type="search" placeholder="搜索订阅内容"></div>
+        <div class="history"><input id="include-history" type="checkbox"><label for="include-history">包含已取消订阅</label></div>
+        <button type="submit">筛选</button>
+        <button id="refresh" type="button" class="secondary">刷新</button>
+      </form>
+    </section>
+    <div class="status-bar">
+      <p id="status" role="status" aria-live="polite" aria-atomic="true">正在加载订阅…</p>
+      <button id="conflict-refresh" type="button" hidden>刷新最新数据</button>
+    </div>
+    <section class="panel subscriptions-panel" aria-label="订阅列表">
+      <table>
+        <caption>已有订阅 <span id="count"></span></caption>
+        <thead><tr><th scope="col">群 / 编号</th><th scope="col">主题与关键词</th><th scope="col">调度</th>
+          <th scope="col">下一次执行</th><th scope="col">状态</th><th scope="col">最近运行</th><th scope="col">操作</th></tr></thead>
+        <tbody id="subscriptions"></tbody>
+      </table>
+    </section>
+    <section id="editor" class="panel editor" hidden aria-labelledby="editor-title">
+      <h2 id="editor-title" tabindex="-1">编辑订阅</h2>
+      <p>保存后重算下一次执行时间，保留推送历史，不会立即推送。关键词修改后需要等待 Codex 更新搜索词。</p>
+      <form id="edit-form" novalidate>
+        <div class="field"><label for="edit-topic">订阅主题</label>
+          <input id="edit-topic" type="text" required aria-describedby="topic-hint topic-error">
+          <p id="topic-hint" class="hint">最多 200 个字符。</p><p id="topic-error" class="field-error"></p></div>
+        <div class="field"><label for="edit-keywords">原始关键词</label>
+          <textarea id="edit-keywords" rows="4" required aria-describedby="keywords-hint keywords-error"></textarea>
+          <p id="keywords-hint" class="hint">每行一个，共 1–20 个，每个最多 80 个字符。</p><p id="keywords-error" class="field-error"></p></div>
+        <div class="field"><label for="edit-kind">调度方式</label><select id="edit-kind">
+          <option value="daily">每天固定时间</option><option value="interval">固定间隔</option>
+        </select></div>
+        <div id="daily-fields" class="field"><label for="edit-daily">每天执行时间（北京时间）</label>
+          <input id="edit-daily" type="time" value="09:00" aria-describedby="schedule-error"></div>
+        <div id="interval-fields" class="interval-fields" hidden>
+          <div><label for="edit-interval">间隔</label><input id="edit-interval" type="number" min="5" step="1" value="60" aria-describedby="schedule-error"></div>
+          <div><label for="edit-unit">单位</label><select id="edit-unit"><option value="minutes">分钟</option><option value="hours">小时</option></select></div>
+        </div>
+        <p id="schedule-error" class="field-error"></p>
+        <p id="edit-error" class="field-error" role="alert"></p>
+        <div class="form-actions"><button id="save-edit" type="submit">保存修改</button>
+          <button id="close-editor" type="button" class="secondary">放弃修改</button></div>
+      </form>
+    </section>
+    <noscript><p>管理操作需要启用浏览器 JavaScript。</p></noscript>
+  </main>
+  <footer>仅本机管理 · 飞书群成员可通过 @机器人管理群内订阅</footer>
+</body>
+</html>
