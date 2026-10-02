@@ -77,9 +77,18 @@ def url_verification_response(payload: dict, config: FeishuConfig) -> Optional[d
     return {"challenge": _text(decoded.get("challenge"), "challenge")}
 
 
-def normalize_event(payload: dict, config: FeishuConfig) -> Optional[NormalizedEvent]:
-    """Accept only group text from a user with a structural mention of this bot."""
-    payload = decode_callback(payload, config)
+def normalize_event(payload: dict, config, received_at: Optional[datetime] = None) -> Optional[NormalizedEvent]:
+    """Accept only group text from a user with a structural mention of this bot.
+
+    A FeishuConfig denotes a legacy authenticated callback. A string is the
+    already-resolved bot identity used by the authenticated long connection.
+    """
+    if isinstance(config, FeishuConfig):
+        payload = decode_callback(payload, config)
+        bot_id = config.bot_open_id
+    else:
+        payload = _object(payload, "event payload")
+        bot_id = config
     if payload.get("type") == "url_verification":
         return None
     if payload.get("schema") != "2.0":
@@ -96,7 +105,6 @@ def normalize_event(payload: dict, config: FeishuConfig) -> Optional[NormalizedE
         return None
     sender_ids = _object(sender.get("sender_id"), "sender_id")
     sender_id = _text(sender_ids.get("open_id"), "sender open_id")
-    bot_id = config.bot_open_id
     if not isinstance(bot_id, str) or not bot_id.strip() or sender_id == bot_id:
         return None
     mentions = message.get("mentions", [])
@@ -132,5 +140,6 @@ def normalize_event(payload: dict, config: FeishuConfig) -> Optional[NormalizedE
         event_id=_text(header.get("event_id"), "event_id"),
         message_id=_text(message.get("message_id"), "message_id"),
         chat_id=_text(message.get("chat_id"), "chat_id"),
-        sender_id=sender_id, text=text, received_at=datetime.now(timezone.utc),
+        sender_id=sender_id, text=text,
+        received_at=received_at if received_at is not None else datetime.now(timezone.utc),
     )

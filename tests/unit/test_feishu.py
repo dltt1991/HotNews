@@ -112,6 +112,18 @@ class ScriptedTransport:
 
 
 class FeishuEventTests(unittest.TestCase):
+    def test_long_connection_payload_needs_only_resolved_bot_identity(self):
+        received_at = datetime(2026, 10, 2, 2, 3, tzinfo=timezone.utc)
+        event = normalize_event(message_event(), "ou_bot", received_at=received_at)
+        self.assertEqual((event.event_id, event.message_id, event.chat_id, event.sender_id, event.text),
+                         ("evt_1", "om_1", "oc_group", "ou_member", "订阅 AI，每天 9 点"))
+        self.assertEqual(event.received_at, received_at)
+
+    def test_long_connection_payload_does_not_trust_header_token_or_app_id(self):
+        payload = message_event()
+        payload["header"].update(token="not-used-by-long-connection", app_id="another-app")
+        self.assertEqual(normalize_event(payload, "ou_bot").event_id, "evt_1")
+
     def test_group_text_mention_becomes_normalized_event(self):
         before = datetime.now(timezone.utc)
         event = normalize_event(message_event(), config())
