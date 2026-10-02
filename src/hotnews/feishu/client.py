@@ -33,14 +33,15 @@ def _failure(response: HttpResponse, payload: dict) -> FeishuAPIError:
     if not isinstance(code, int) or isinstance(code, bool):
         code = None
     retry_after = None
-    for key, value in response.headers.items():
-        if key.lower() == "retry-after":
-            try:
-                delay = float(value)
-                if math.isfinite(delay) and delay >= 0:
-                    retry_after = delay
-            except (TypeError, ValueError):
-                pass
+    headers = {key.lower(): value for key, value in response.headers.items()}
+    for name in ("x-ogw-ratelimit-reset", "retry-after"):
+        try:
+            delay = float(headers.get(name))
+            if math.isfinite(delay) and delay >= 0:
+                retry_after = delay
+                break
+        except (TypeError, ValueError):
+            pass
     retryable = (response.status in (401, 429) or response.status >= 500
                  or code == 99991400 or code in _AUTH_CODES)
     return FeishuAPIError("Feishu API request failed (HTTP %d, code %s)" % (response.status, code),

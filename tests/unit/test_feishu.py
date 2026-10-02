@@ -344,6 +344,45 @@ class FeishuClientTests(unittest.TestCase):
         self.assertEqual((caught.exception.status, caught.exception.retry_after), (429, 7.0))
         self.assertEqual(len(transport.requests), 2)
 
+    def test_feishu_rate_limit_reset_seconds_take_precedence_for_http_and_api_limits(self):
+        cases = (
+            (429, {"X-Ogw-RateLimit-Reset": "9", "Retry-After": "7"}, 9.0),
+            (400, {"retry-after": "7", "x-ogw-ratelimit-reset": "2.5"}, 2.5),
+            (400, {"x-ogw-ratelimit-reset": "12"}, 12.0),
+            (200, {"RETRY-AFTER": "7", "X-OGW-RATELIMIT-RESET": "0"}, 0.0),
+        )
+        for status, headers, expected in cases:
+            transport = ScriptedTransport([token(), response(
+                {"code": 99991400, "msg": "request trigger frequency limit"}, status, headers)])
+            with self.subTest(status=status):
+                with self.assertRaises(FeishuAPIError) as caught:
+                    FeishuClient(config(), transport).send_text("oc_group", "hello", "key")
+                self.assertEqual((caught.exception.status, caught.exception.code), (status, 99991400))
+                self.assertEqual(caught.exception.retry_after, expected)
+                self.assertTrue(caught.exception.retryable)
+                self.assertEqual(len(transport.requests), 2)
+
+    def test_invalid_feishu_reset_falls_back_to_valid_retry_after(self):
+        for reset in (None, "", "invalid", "-1", "nan", "inf", "-inf"):
+            transport = ScriptedTransport([token(), response(
+                {"code": 99991400, "msg": "request trigger frequency limit"}, 400,
+                {"X-Ogw-RateLimit-Reset": reset, "rEtRy-AfTeR": "7.5"})])
+            with self.subTest(reset=reset), self.assertRaises(FeishuAPIError) as caught:
+                FeishuClient(config(), transport).send_text("oc_group", "hello", "key")
+            self.assertEqual(caught.exception.retry_after, 7.5)
+
+    def test_invalid_or_absent_rate_limit_delays_leave_retry_after_unset(self):
+        cases = ({}, {"x-ogw-ratelimit-reset": "nan"},
+                 {"x-ogw-ratelimit-reset": "-1", "Retry-After": "-2"},
+                 {"x-ogw-ratelimit-reset": "inf", "Retry-After": "nan"},
+                 {"x-ogw-ratelimit-reset": "invalid", "Retry-After": "inf"})
+        for headers in cases:
+            transport = ScriptedTransport([token(), response(
+                {"code": 99991400, "msg": "request trigger frequency limit"}, 429, headers)])
+            with self.subTest(headers=headers), self.assertRaises(FeishuAPIError) as caught:
+                FeishuClient(config(), transport).send_text("oc_group", "hello", "key")
+            self.assertIsNone(caught.exception.retry_after)
+
     def test_nonfinite_retry_after_is_ignored(self):
         transport = ScriptedTransport([token(), response({"code": 99991400}, 429, {"Retry-After": "inf"})])
         with self.assertRaises(FeishuAPIError) as caught:
