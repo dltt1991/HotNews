@@ -1,7 +1,7 @@
 import re
 from typing import Any, Dict, List, Tuple
 
-from .store import DeliveryStore
+from ..store import DeliveryStore
 
 
 HELP = ("可用指令：\n订阅 AI、大模型 每天 09:00\n"

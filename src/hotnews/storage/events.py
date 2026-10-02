@@ -105,29 +105,51 @@ class EventRepository:
                 ).fetchone()))
             return claimed
 
-    def complete(self, event_id: str, owner: str, result: str) -> None:
-        """Complete by external Feishu event_id, only while owned and leased."""
-        with self.database.connect() as connection:
-            cursor = connection.execute(
-                "UPDATE inbound_events SET status = 'completed', result_summary = ?, "
-                "last_error = NULL, lease_owner = NULL, lease_until = NULL "
-                "WHERE event_id = ? AND status = 'leased' AND lease_owner = ?",
-                (result, event_id, owner),
-            )
-            if cursor.rowcount != 1:
-                raise LeaseConflict("event is not leased by this owner")
+    def get(self, event_id: str, connection: Optional[sqlite3.Connection] = None) -> Optional[InboundEvent]:
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                return self.get(event_id, connection=owned_connection)
+        row = connection.execute("SELECT * FROM inbound_events WHERE event_id = ?", (event_id,)).fetchone()
+        return _inbound_event(row) if row is not None else None
 
-    def fail(self, event_id: str, owner: str, error: str) -> None:
+    def get_result(self, event_id: str, connection: Optional[sqlite3.Connection] = None) -> Optional[str]:
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                return self.get_result(event_id, connection=owned_connection)
+        row = connection.execute("SELECT result_summary FROM inbound_events WHERE event_id = ?", (event_id,)).fetchone()
+        return row["result_summary"] if row is not None else None
+
+    def complete(self, event_id: str, owner: str, result: str,
+                 connection: Optional[sqlite3.Connection] = None,
+                 now: Optional[datetime] = None) -> None:
+        """Complete by external Feishu event_id, only while owned and leased."""
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                return self.complete(event_id, owner, result, connection=owned_connection, now=now)
+        condition = " AND lease_until > ?" if now is not None else ""
+        parameters = (result, event_id, owner) + ((_utc_text(now),) if now is not None else ())
+        cursor = connection.execute(
+            "UPDATE inbound_events SET status = 'completed', result_summary = ?, "
+            "last_error = NULL, lease_owner = NULL, lease_until = NULL "
+            "WHERE event_id = ? AND status = 'leased' AND lease_owner = ?" + condition, parameters)
+        if cursor.rowcount != 1:
+            raise LeaseConflict("event is not leased by this owner")
+
+    def fail(self, event_id: str, owner: str, error: str,
+             connection: Optional[sqlite3.Connection] = None,
+             now: Optional[datetime] = None) -> None:
         """Permanently fail an owned event, identified by external event_id."""
-        with self.database.connect() as connection:
-            cursor = connection.execute(
-                "UPDATE inbound_events SET status = 'failed', last_error = ?, "
-                "lease_owner = NULL, lease_until = NULL "
-                "WHERE event_id = ? AND status = 'leased' AND lease_owner = ?",
-                (error, event_id, owner),
-            )
-            if cursor.rowcount != 1:
-                raise LeaseConflict("event is not leased by this owner")
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                return self.fail(event_id, owner, error, connection=owned_connection, now=now)
+        condition = " AND lease_until > ?" if now is not None else ""
+        parameters = (error, event_id, owner) + ((_utc_text(now),) if now is not None else ())
+        cursor = connection.execute(
+            "UPDATE inbound_events SET status = 'failed', last_error = ?, "
+            "lease_owner = NULL, lease_until = NULL "
+            "WHERE event_id = ? AND status = 'leased' AND lease_owner = ?" + condition, parameters)
+        if cursor.rowcount != 1:
+            raise LeaseConflict("event is not leased by this owner")
 
 
 class LeaseRepository:

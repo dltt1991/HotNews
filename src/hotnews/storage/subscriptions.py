@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 import json
+import sqlite3
 from typing import List, Optional
 from uuid import uuid4
 
@@ -66,8 +67,14 @@ class SubscriptionRepository:
 
     def create(self, chat_id: str, creator_id: str, topic: str, keywords,
                search_terms=(), schedule: Optional[Schedule] = None,
-               now: Optional[datetime] = None) -> Subscription:
+               now: Optional[datetime] = None,
+               connection: Optional[sqlite3.Connection] = None) -> Subscription:
         """Allocate the next chat number and insert in a single write transaction."""
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                owned_connection.execute("BEGIN IMMEDIATE")
+                return self.create(chat_id, creator_id, topic, keywords, search_terms, schedule, now,
+                                   connection=owned_connection)
         for name, value in (("chat_id", chat_id), ("creator_id", creator_id)):
             if not isinstance(value, str) or not value.strip():
                 raise ValidationError("%s must be a non-empty string" % name)
@@ -78,26 +85,28 @@ class SubscriptionRepository:
         timestamp = _utc_text(instant)
         due = next_run(schedule, instant)
         subscription_id = str(uuid4())
-        with self.database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("INSERT INTO chats (chat_id) VALUES (?) ON CONFLICT DO NOTHING", (chat_id,))
-            number = connection.execute("SELECT next_display_number FROM chats WHERE chat_id = ?",
-                                        (chat_id,)).fetchone()[0]
-            connection.execute("UPDATE chats SET next_display_number = next_display_number + 1 WHERE chat_id = ?",
-                               (chat_id,))
-            connection.execute(
-                "INSERT INTO subscriptions (id, chat_id, display_number, creator_id, topic, keywords_json, "
-                "search_terms_json, schedule_kind, daily_at, interval_minutes, next_run_at, state, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (subscription_id, chat_id, number, creator_id, topic, json.dumps(keywords), json.dumps(terms),
-                 schedule.kind, schedule.daily_at, schedule.interval_minutes,
-                 _utc_text(due) if due is not None else None,
-                 "ready" if terms else "search_terms_pending", timestamp, timestamp),
-            )
-            return _subscription(connection.execute("SELECT * FROM subscriptions WHERE id = ?",
-                                                    (subscription_id,)).fetchone())
+        connection.execute("INSERT INTO chats (chat_id) VALUES (?) ON CONFLICT DO NOTHING", (chat_id,))
+        number = connection.execute("SELECT next_display_number FROM chats WHERE chat_id = ?",
+                                    (chat_id,)).fetchone()[0]
+        connection.execute("UPDATE chats SET next_display_number = next_display_number + 1 WHERE chat_id = ?",
+                           (chat_id,))
+        connection.execute(
+            "INSERT INTO subscriptions (id, chat_id, display_number, creator_id, topic, keywords_json, "
+            "search_terms_json, schedule_kind, daily_at, interval_minutes, next_run_at, state, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (subscription_id, chat_id, number, creator_id, topic, json.dumps(keywords), json.dumps(terms),
+             schedule.kind, schedule.daily_at, schedule.interval_minutes,
+             _utc_text(due) if due is not None else None,
+             "ready" if terms else "search_terms_pending", timestamp, timestamp),
+        )
+        return _subscription(connection.execute("SELECT * FROM subscriptions WHERE id = ?",
+                                                (subscription_id,)).fetchone())
 
-    def list(self, chat_id: Optional[str] = None, include_cancelled: bool = False) -> List[Subscription]:
+    def list(self, chat_id: Optional[str] = None, include_cancelled: bool = False,
+             connection: Optional[sqlite3.Connection] = None) -> List[Subscription]:
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                return self.list(chat_id, include_cancelled, connection=owned_connection)
         conditions, parameters = [], []
         if chat_id is not None:
             conditions.append("chat_id = ?")
@@ -107,14 +116,27 @@ class SubscriptionRepository:
         query = "SELECT * FROM subscriptions"
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        with self.database.connect() as connection:
-            return [_subscription(row) for row in connection.execute(
-                query + " ORDER BY chat_id, display_number", parameters).fetchall()]
+        return [_subscription(row) for row in connection.execute(
+            query + " ORDER BY chat_id, display_number", parameters).fetchall()]
 
-    def get(self, id: str) -> Optional[Subscription]:
-        with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM subscriptions WHERE id = ?", (id,)).fetchone()
-            return _subscription(row) if row is not None else None
+    def get(self, id: str, connection: Optional[sqlite3.Connection] = None) -> Optional[Subscription]:
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                return self.get(id, connection=owned_connection)
+        row = connection.execute("SELECT * FROM subscriptions WHERE id = ?", (id,)).fetchone()
+        return _subscription(row) if row is not None else None
+
+    def get_by_number(self, chat_id: str, number: int,
+                      connection: Optional[sqlite3.Connection] = None) -> Optional[Subscription]:
+        """Resolve only within the event's group; numbers are never global IDs."""
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            raise ValidationError("subscription number must be a positive integer")
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                return self.get_by_number(chat_id, number, connection=owned_connection)
+        row = connection.execute("SELECT * FROM subscriptions WHERE chat_id = ? AND display_number = ?",
+                                 (chat_id, number)).fetchone()
+        return _subscription(row) if row is not None else None
 
     @staticmethod
     def _current(connection, id: str, expected_version: int):
@@ -177,12 +199,15 @@ class SubscriptionRepository:
                               state="ready" if current.search_terms else "search_terms_pending",
                               next_run_at=_utc_text(due) if due is not None else None)
 
-    def cancel(self, id: str, expected_version: int, now: Optional[datetime] = None) -> Subscription:
+    def cancel(self, id: str, expected_version: int, now: Optional[datetime] = None,
+               connection: Optional[sqlite3.Connection] = None) -> Subscription:
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                owned_connection.execute("BEGIN IMMEDIATE")
+                return self.cancel(id, expected_version, now, connection=owned_connection)
         timestamp = _utc_text(_now(now))
-        with self.database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._current(connection, id, expected_version)
-            return self._save(connection, id, timestamp, state="cancelled", cancelled_at=timestamp)
+        self._current(connection, id, expected_version)
+        return self._save(connection, id, timestamp, state="cancelled", cancelled_at=timestamp)
 
     def claim_pending_terms(self, owner: str, limit: int, now: datetime,
                             lease_seconds: int) -> List[Subscription]:
@@ -236,18 +261,21 @@ class SubscriptionRepository:
             return self._save(connection, id, timestamp)
 
     def request_manual_run(self, id: str, expected_version: int,
-                           now: Optional[datetime] = None) -> str:
+                           now: Optional[datetime] = None,
+                           connection: Optional[sqlite3.Connection] = None) -> str:
         """Queue one manual run while preserving pause and the regular schedule."""
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                owned_connection.execute("BEGIN IMMEDIATE")
+                return self.request_manual_run(id, expected_version, now, connection=owned_connection)
         timestamp = _utc_text(_now(now))
         run_id = str(uuid4())
-        with self.database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = self._current(connection, id, expected_version)
-            if row["state"] not in ("ready", "paused") or not json.loads(row["search_terms_json"]):
-                raise ValidationError("manual run requires available search terms")
-            connection.execute(
-                "INSERT INTO subscription_runs (id, subscription_id, trigger, created_at) VALUES (?, ?, 'manual', ?)",
-                (run_id, id, timestamp),
-            )
-            self._save(connection, id, timestamp)
+        row = self._current(connection, id, expected_version)
+        if row["state"] not in ("ready", "paused") or not json.loads(row["search_terms_json"]):
+            raise ValidationError("manual run requires available search terms")
+        connection.execute(
+            "INSERT INTO subscription_runs (id, subscription_id, trigger, created_at) VALUES (?, ?, 'manual', ?)",
+            (run_id, id, timestamp),
+        )
+        self._save(connection, id, timestamp)
         return run_id
