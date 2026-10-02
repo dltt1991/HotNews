@@ -1,7 +1,7 @@
 """Non-secret application configuration and runtime-only Feishu credentials."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -11,10 +11,12 @@ from .domain import ValidationError
 @dataclass(frozen=True)
 class FeishuConfig:
     app_id: str
-    app_secret: str
-    verification_token: str
-    encrypt_key: Optional[str] = None
+    app_secret: str = field(repr=False)
+    # Kept optional until the webhook modules are removed later in the migration.
+    verification_token: str = field(default="", repr=False)
+    encrypt_key: Optional[str] = field(default=None, repr=False)
     bot_open_id: Optional[str] = None
+    ws_proxy: Optional[str] = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -115,7 +117,9 @@ def load_config(path: str) -> AppConfig:
 
 def load_feishu_config(environ: Mapping[str, str]) -> FeishuConfig:
     """Load Feishu credentials only from the supplied runtime environment."""
-    required = ("FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_VERIFICATION_TOKEN")
+    from .feishu.proxy import resolve_ws_proxy
+
+    required = ("FEISHU_APP_ID", "FEISHU_APP_SECRET")
     missing = [name for name in required if not environ.get(name, "").strip()]
     if missing:
         raise ValidationError("missing required Feishu environment variables: %s" % ", ".join(missing))
@@ -123,6 +127,7 @@ def load_feishu_config(environ: Mapping[str, str]) -> FeishuConfig:
     return FeishuConfig(
         app_id=environ["FEISHU_APP_ID"],
         app_secret=environ["FEISHU_APP_SECRET"],
-        verification_token=environ["FEISHU_VERIFICATION_TOKEN"],
+        verification_token=environ.get("FEISHU_VERIFICATION_TOKEN", ""),
         encrypt_key=encrypt_key,
+        ws_proxy=resolve_ws_proxy(environ),
     )

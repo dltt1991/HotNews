@@ -23,14 +23,27 @@ class ConfigDomainTests(unittest.TestCase):
         feishu = load_feishu_config({
             "FEISHU_APP_ID": "env-id",
             "FEISHU_APP_SECRET": "env-secret",
-            "FEISHU_VERIFICATION_TOKEN": "env-token",
+            "FEISHU_WS_PROXY": "http://proxy-user:proxy-password@127.0.0.1:7890",
         })
         self.assertEqual(feishu.app_id, "env-id")
         self.assertEqual(feishu.app_secret, "env-secret")
+        self.assertEqual(feishu.ws_proxy, "http://proxy-user:proxy-password@127.0.0.1:7890")
+        self.assertNotIn("env-secret", repr(feishu))
+        self.assertNotIn("proxy-password", repr(feishu))
 
     def test_missing_required_secret_is_rejected_by_runtime_loader(self):
         with self.assertRaises(ValidationError):
             load_feishu_config({})
+        with self.assertRaises(ValidationError):
+            load_feishu_config({"FEISHU_APP_ID": "app"})
+
+    def test_callback_secrets_are_not_required_for_long_connection(self):
+        feishu = load_feishu_config({
+            "FEISHU_APP_ID": "app",
+            "FEISHU_APP_SECRET": "secret",
+        })
+        self.assertEqual((feishu.app_id, feishu.app_secret, feishu.ws_proxy),
+                         ("app", "secret", None))
 
     def test_agent_config_load_does_not_read_secrets(self):
         path = self.write_config({"database_path": "state.sqlite"})
