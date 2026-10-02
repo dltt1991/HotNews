@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hotnews-agent"
+version = "0.1.0"
+description = "Hot news subscription agent for Feishu and WeCom groups"
+requires-python = ">=3.8"
+dependencies = ["cryptography>=2.8"]
+
+[project.scripts]
+hotnews = "hotnews.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

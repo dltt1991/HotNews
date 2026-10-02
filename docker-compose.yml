@@ -1,0 +1,13 @@
+services:
+  hotnews:
+    build: .
+    restart: unless-stopped
+    environment:
+      FEISHU_WEBHOOK: ${FEISHU_WEBHOOK:-}
+      FEISHU_SECRET: ${FEISHU_SECRET:-}
+      WECOM_WEBHOOK: ${WECOM_WEBHOOK:-}
+      TZ: Asia/Shanghai
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/app/data
+
