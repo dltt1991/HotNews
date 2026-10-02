@@ -2,6 +2,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import logging
+import os
 import sys
 
 from .commands.schema import nonempty_string, object_fields, parse_intent, parse_json, positive_integer
@@ -9,6 +10,7 @@ from .commands.service import CommandService, json_default
 from .config import load_config
 from .domain import LeaseConflict, NewsResult, Schedule, Subscription, ValidationError, VersionConflict
 from .feishu.cards import render_digest
+from .feishu.diagnostics import check_feishu
 from .storage.database import Database
 from .storage.events import EventRepository, LeaseRepository, _datetime, _utc_text
 from .storage.runs import RunRepository
@@ -29,7 +31,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--config", default="config.json", help="JSON config file")
     result.add_argument("--verbose", action="store_true")
     commands = result.add_subparsers(dest="command", required=True)
-    commands.add_parser("serve", help="run Feishu callback, localhost admin and outbox worker")
+    commands.add_parser("serve", help="run Feishu long connection, localhost admin and outbox worker")
+    commands.add_parser("check-feishu", help="verify Feishu credentials, proxy and long connection")
     agent = commands.add_parser("agent", help="restricted JSON interface for Codex")
     actions = agent.add_subparsers(dest="agent_command", required=True)
     actions.add_parser("claim-events", help="claim a bounded batch of queued group messages")
@@ -247,6 +250,18 @@ def main() -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if args.command == "check-feishu":
+        try:
+            write_output(check_feishu(os.environ))
+            return 0
+        except ValidationError:
+            write_output({"error": "validation_error"})
+            sys.stderr.write("Invalid Feishu configuration.\n")
+            return 2
+        except Exception:
+            write_output({"error": "connection_error"})
+            sys.stderr.write("Feishu connection check failed.\n")
+            return 1
     import signal
     import threading
     from .runtime import run_service

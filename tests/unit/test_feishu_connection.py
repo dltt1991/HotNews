@@ -109,6 +109,31 @@ class FeishuConnectionTests(unittest.TestCase):
         service.run(stop)
         self.assertEqual(attempts, [1])
 
+    def test_check_returns_after_first_connection_and_stops_session(self):
+        def factory(config, callback):
+            def connected(stop_event, on_connected, _):
+                on_connected()
+                stop_event.wait(1)
+            return Connector(connected)
+
+        service = FeishuLongConnection(self.config(), Intake(), ConnectionStatus(),
+                                       connector_factory=factory)
+        snapshot = service.check(1)
+        self.assertEqual(snapshot.state, "connected")
+
+    def test_check_timeout_is_bounded_and_sanitized(self):
+        gate = threading.Event()
+        def factory(config, callback):
+            return Connector(lambda *_: gate.wait(1))
+        service = FeishuLongConnection(self.config(), Intake(), ConnectionStatus(),
+                                       connector_factory=factory)
+        try:
+            with self.assertRaises(OSError) as caught:
+                service.check(0.01)
+            self.assertEqual(str(caught.exception), "Feishu connection check timed out")
+        finally:
+            gate.set()
+
 
 if __name__ == "__main__":
     unittest.main()

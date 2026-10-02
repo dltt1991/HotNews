@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import threading
+import time
 from typing import Callable, Optional
 
 from ..config import FeishuConfig
@@ -126,3 +127,36 @@ class FeishuLongConnection:
                     connector.close()
         if self.status.snapshot().state != "fatal":
             self.status.stopped()
+
+    def check(self, timeout_seconds: float) -> ConnectionSnapshot:
+        """Return the first connected snapshot, then stop without sending events."""
+        if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        stop_event = threading.Event()
+        errors = []
+
+        def target():
+            try:
+                self.run(stop_event)
+            except Exception as error:
+                errors.append(error)
+
+        thread = threading.Thread(name="hotnews-feishu-check", target=target, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            snapshot = self.status.snapshot()
+            if snapshot.state == "connected":
+                stop_event.set()
+                thread.join(min(1.0, timeout_seconds))
+                return snapshot
+            if errors:
+                raise errors[0]
+            if snapshot.state == "fatal":
+                raise FatalConnectionError(snapshot.last_error or "Feishu connection failed")
+            time.sleep(min(0.02, max(0.001, timeout_seconds / 10)))
+        stop_event.set()
+        thread.join(min(0.1, timeout_seconds))
+        if errors:
+            raise errors[0]
+        raise OSError("Feishu connection check timed out")

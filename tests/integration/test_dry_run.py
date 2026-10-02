@@ -88,12 +88,12 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual(json.loads(process.stdout)["result_count"], 1)
 
-    def test_cli_has_only_serve_agent_dry_run_and_sanitizes_serve_failure(self):
+    def test_cli_has_expected_commands_and_sanitizes_serve_failure(self):
         process = subprocess.run([sys.executable, "-m", "hotnews.cli", "--help"],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                  env=dict(os.environ, PYTHONPATH="src"), timeout=10)
         self.assertEqual(process.returncode, 0)
-        self.assertIn("{serve,agent,dry-run}", process.stdout)
+        self.assertIn("{serve,check-feishu,agent,dry-run}", process.stdout)
         self.assertNotIn("scheduler", process.stdout)
         for command in ("once", "webhook"):
             self.assertEqual(self.invoke({}, command).returncode, 2)
