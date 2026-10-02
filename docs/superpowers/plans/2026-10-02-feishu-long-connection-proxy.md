@@ -6,7 +6,7 @@
 
 **Architecture:** The official `lark-oapi` client owns Feishu framing and dispatch. A single isolated compatibility module supplies proxy-aware endpoint discovery and WebSocket dialing; SDK events are converted to ordinary dictionaries and persisted through the existing SQLite event/outbox transaction. The runtime supervises long connection, admin, and outbox components and exposes a sanitized in-memory connection snapshot to the admin API.
 
-**Tech Stack:** Python 3.8+, `lark-oapi==1.7.3`, `websockets==13.1`, `python-socks[asyncio]==2.7.2`, SQLite, `unittest`
+**Tech Stack:** Python 3.8+, `lark-oapi==1.7.3`, `websockets==13.1`, `PySocks==1.7.1`, SQLite, `unittest`
 
 **Spec:** `docs/superpowers/specs/2026-10-02-feishu-long-connection-proxy-design.md`
 
@@ -20,7 +20,7 @@
 - `FEISHU_WS_PROXY` affects endpoint discovery and WebSocket connection only; REST sends continue using standard proxy variables.
 - Admin remains bound to `127.0.0.1`; no Feishu callback port remains.
 - Never log or return App Secret, proxy credentials, URL query strings, or raw event text.
-- Preserve Python 3.8 support; pin `lark-oapi==1.7.3`, `websockets==13.1`, and `python-socks[asyncio]==2.7.2`, and do not require automatic proxy support added only by newer Python/websockets combinations.
+- Preserve Python 3.8 support; pin `lark-oapi==1.7.3`, `websockets==13.1`, and `PySocks==1.7.1`, and do not require automatic proxy support added only by newer Python/websockets combinations.
 - All automated tests use fakes and local files; no test may require Feishu or internet access.
 
 ## Review Focus
@@ -146,7 +146,7 @@ Expected: FAIL because connection modules do not exist.
 
 - [ ] **Step 4: Pin dependencies and implement the compatibility boundary**
 
-Add the exact Python-3.8-compatible pins `lark-oapi==1.7.3`, `websockets==13.1`, and `python-socks[asyncio]==2.7.2`. Implement endpoint discovery with an instance-scoped proxy argument and create a proxy-connected socket for WebSocket TLS, rather than mutating `HTTP_PROXY`, monkeypatching a module globally, or depending on automatic proxy support unavailable on Python 3.8. Reject an unexpected SDK version/signature before network access.
+Add the exact Python-3.8-compatible pins `lark-oapi==1.7.3`, `websockets==13.1`, and `PySocks==1.7.1`. Implement endpoint discovery with an instance-scoped proxy argument and create a proxy-connected socket for WebSocket TLS, rather than mutating `HTTP_PROXY`, monkeypatching a module globally, or depending on automatic proxy support unavailable on Python 3.8. Reject an unexpected SDK version/signature before network access.
 
 - [ ] **Step 5: Implement lifecycle supervision**
 

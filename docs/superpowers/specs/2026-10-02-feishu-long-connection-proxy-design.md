@@ -121,7 +121,7 @@ all_proxy
 FEISHU_WS_PROXY=http://127.0.0.1:7890
 ```
 
-支持 `http`、`https`、`socks5` 和 `socks5h`。空白值视为未配置；其他协议、缺失主机或非法端口在启动时直接报错。SOCKS 支持所需依赖随项目安装。
+支持 `http`、`https`、`socks5` 和 `socks5h`。空白值视为未配置；其他协议、缺失主机或非法端口在启动时直接报错。SOCKS 支持所需的 PySocks 依赖随项目安装。
 
 `FEISHU_WS_PROXY` 仅覆盖飞书长连接和长连接端点发现。飞书 REST API 与其他 HTTPS 请求继续使用标准代理环境变量，避免项目私有变量意外改变所有外部请求。
 
