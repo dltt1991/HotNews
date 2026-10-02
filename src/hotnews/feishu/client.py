@@ -90,7 +90,9 @@ class FeishuClient:
                 # Proxies may return HTML/empty/truncated JSON errors. Status and
                 # rate-limit headers still determine safe retry behavior.
                 return response, {}
-            raise FeishuAPIError("invalid Feishu API response", status=response.status) from None
+            # A malformed success response cannot prove the server did not send.
+            # Retry the same idempotency UUID rather than permanently losing it.
+            raise FeishuAPIError("invalid Feishu API response", status=response.status, retryable=True) from None
         return response, payload
 
     def _tenant_token(self, refresh: bool = False) -> str:

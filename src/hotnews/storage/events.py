@@ -151,6 +151,20 @@ class EventRepository:
         if cursor.rowcount != 1:
             raise LeaseConflict("event is not leased by this owner")
 
+    def defer(self, event_id: str, owner: str, *, now: datetime,
+              connection: Optional[sqlite3.Connection] = None) -> None:
+        """Release unfinished work for the next tick, retaining its attempts."""
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                return self.defer(event_id, owner, now=now, connection=owned_connection)
+        cursor = connection.execute(
+            "UPDATE inbound_events SET status = 'pending', lease_owner = NULL, lease_until = NULL "
+            "WHERE event_id = ? AND status = 'leased' AND lease_owner = ? AND lease_until > ?",
+            (event_id, owner, _utc_text(now)),
+        )
+        if cursor.rowcount != 1:
+            raise LeaseConflict("event is not leased by this owner")
+
 
 class LeaseRepository:
     """Global coordination predicates: unavailable/unowned leases return False."""

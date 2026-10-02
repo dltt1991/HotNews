@@ -2,6 +2,7 @@ services:
   hotnews:
     build: .
     restart: unless-stopped
+    user: "${HOTNEWS_UID:-1000}:${HOTNEWS_GID:-1000}"
     environment:
       FEISHU_APP_ID: ${FEISHU_APP_ID:?set FEISHU_APP_ID}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:?set FEISHU_APP_SECRET}

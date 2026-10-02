@@ -215,7 +215,36 @@ class SubscriptionRepository:
                 return self.cancel(id, expected_version, now, connection=owned_connection)
         timestamp = _utc_text(_now(now))
         self._current(connection, id, expected_version)
-        return self._save(connection, id, timestamp, state="cancelled", cancelled_at=timestamp)
+        cancelled = self._save(connection, id, timestamp, state="cancelled", cancelled_at=timestamp)
+        self._cancel_unsent_work(connection, id, timestamp)
+        return cancelled
+
+    @staticmethod
+    def _cancel_unsent_work(connection, id: str, timestamp: str) -> None:
+        """Close unsent cancelled work; also used after an in-flight lease ends."""
+        # The transaction serializes with outbox claims. A live send lease may
+        # already be crossing the network, so preserve its factual confirmation.
+        # Pending and expired/unowned leases have no such entitlement.
+        reason = "subscription cancelled"
+        connection.execute(
+            "UPDATE outbox SET status = 'failed', last_error = ?, lease_owner = NULL, "
+            "lease_until = NULL, next_attempt_at = NULL WHERE run_id IN "
+            "(SELECT id FROM subscription_runs WHERE subscription_id = ?) AND "
+            "(status = 'pending' OR (status = 'leased' AND "
+            "(lease_until <= ? OR lease_until IS NULL OR lease_owner IS NULL)))",
+            (reason, id, timestamp),
+        )
+        connection.execute(
+            "UPDATE deliveries SET status = 'failed', last_error = ? WHERE subscription_id = ? "
+            "AND status = 'pending' AND (outbox_id IS NULL OR outbox_id IN "
+            "(SELECT id FROM outbox WHERE status = 'failed'))", (reason, id),
+        )
+        connection.execute(
+            "UPDATE subscription_runs SET status = 'failed', last_error = ?, completed_at = ?, "
+            "lease_until = NULL WHERE subscription_id = ? AND status IN ('pending', 'leased', 'awaiting_delivery') "
+            "AND NOT EXISTS (SELECT 1 FROM outbox WHERE outbox.run_id = subscription_runs.id "
+            "AND outbox.status IN ('leased', 'sent'))", (reason, timestamp, id),
+        )
 
     def claim_pending_terms(self, owner: str, limit: int, now: datetime,
                             lease_seconds: int) -> List[Subscription]:

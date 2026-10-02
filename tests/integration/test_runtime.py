@@ -129,6 +129,107 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(worker.run_once(NOW), 0)
         self.assertEqual(len(transport.messages), 1)
 
+    def test_cancel_before_claim_stops_digest_without_affecting_ack_or_other_subscription(self):
+        sub, run = self.prepare()
+        original = self.rows("deliveries")[0]
+        cancelled = self.subscriptions.cancel(sub.id, sub.version, now=NOW)
+        worker, transport = self.worker()
+        self.assertEqual(worker.run_once(NOW), 0)
+        self.assertEqual(transport.messages, [])
+        self.assertEqual(self.rows("outbox")[0]["status"], "failed")
+        self.assertEqual(self.rows("deliveries")[0]["status"], "failed")
+        self.assertEqual(self.rows("subscription_runs")[0]["status"], "failed")
+        self.assertEqual(self.outbox.claim("later", 3, NOW + timedelta(days=1), 60), [])
+        self.assertEqual(self.runs.history(sub.id), [])
+        self.assertEqual(self.subscriptions.get(sub.id), cancelled)
+        self.assertEqual((self.rows("deliveries")[0]["topic_fingerprint"],
+                          self.rows("deliveries")[0]["event_key"]),
+                         (original["topic_fingerprint"], original["event_key"]))
+        self.outbox.enqueue("chat", "text", {"text": "ack"}, "event:cancel:ack")
+        self.prepare("other")
+        self.assertEqual(worker.run_once(NOW), 2)
+        self.assertEqual({message["uuid"] for message in transport.messages},
+                         {"event:cancel:ack", self.rows("outbox")[-1]["idempotency_key"]})
+
+    def test_cancel_preserves_inflight_confirmation_and_sent_factual_history(self):
+        sub, _ = self.prepare()
+        item = self.outbox.claim("sender", 1, NOW, 60)[0]
+        cancelled = self.subscriptions.cancel(sub.id, sub.version, now=NOW)
+        self.assertEqual(self.rows("outbox")[0]["status"], "leased")
+        self.assertEqual(self.rows("subscription_runs")[0]["status"], "awaiting_delivery")
+        self.outbox.sent(item.id, "sender", "already-in-flight", NOW + timedelta(seconds=1))
+        self.assertEqual(self.subscriptions.get(sub.id), cancelled)
+        self.assertEqual(self.rows("subscription_runs")[0]["status"], "completed")
+        self.assertEqual(self.runs.history(sub.id)[0]["event_key"], "release:chat")
+        other, _ = self.prepare("sent")
+        worker, _ = self.worker()
+        worker.run_once(NOW)
+        sent_history = self.runs.history(other.id)
+        self.subscriptions.cancel(other.id, self.subscriptions.get(other.id).version, now=NOW)
+        self.assertEqual(self.runs.history(other.id), sent_history)
+        self.assertEqual(self.rows("outbox")[-1]["status"], "sent")
+
+    def test_cancel_expires_unsent_leases_and_prevents_defensive_pending_claim(self):
+        sub, _ = self.prepare()
+        self.outbox.claim("old-sender", 1, NOW - timedelta(minutes=2), 60)
+        self.subscriptions.cancel(sub.id, sub.version, now=NOW)
+        self.assertEqual(self.rows("outbox")[0]["status"], "failed")
+        # Defend against a restored old pending row, or retry after an in-flight
+        # attempt reports an unknown outcome following cancellation.
+        with self.database.connect() as connection:
+            connection.execute("UPDATE outbox SET status = 'pending', next_attempt_at = NULL")
+        worker, transport = self.worker()
+        self.assertEqual(worker.run_once(NOW), 0)
+        self.assertEqual(transport.messages, [])
+
+    def test_cancelled_inflight_lease_expiry_closes_unknown_work_without_a_send(self):
+        sub, _ = self.prepare()
+        self.outbox.claim("inflight", 1, NOW, 60)
+        cancelled = self.subscriptions.cancel(sub.id, sub.version, now=NOW)
+        worker, transport = self.worker()
+        self.assertEqual(worker.run_once(NOW + timedelta(seconds=60)), 0)
+        self.assertEqual(transport.messages, [])
+        self.assertEqual(self.rows("outbox")[0]["status"], "failed")
+        self.assertEqual(self.rows("deliveries")[0]["status"], "failed")
+        self.assertEqual(self.rows("subscription_runs")[0]["status"], "failed")
+        self.assertEqual(self.subscriptions.get(sub.id), cancelled)
+
+    def test_cancel_during_unknown_inflight_attempt_closes_retry_without_new_send(self):
+        sub, _ = self.prepare()
+        subscriptions = self.subscriptions
+
+        class CancelDuringSend(Transport):
+            def request(self, method, url, headers=None, body=None, timeout=15):
+                if "/im/v1/messages" in url:
+                    subscriptions.cancel(sub.id, sub.version, now=NOW)
+                return super().request(method, url, headers, body, timeout)
+
+        worker, transport = self.worker(CancelDuringSend([OSError(SECRET)]))
+        worker.run_once(NOW)
+        self.assertEqual(self.rows("outbox")[0]["status"], "failed")
+        self.assertEqual(self.rows("deliveries")[0]["status"], "failed")
+        self.assertEqual(self.rows("subscription_runs")[0]["status"], "failed")
+        self.assertEqual(self.runs.history(sub.id), [])
+        self.assertEqual(self.subscriptions.get(sub.id).consecutive_failures, 0)
+        self.assertEqual(worker.run_once(NOW + timedelta(minutes=10)), 0)
+        self.assertEqual(len(transport.messages), 1)
+
+    def test_malformed_200_retries_same_digest_uuid_without_new_run(self):
+        sub, run = self.prepare()
+        worker, transport = self.worker(Transport([HttpResponse(200, {}, b'{"code":0,"data":')]))
+        worker.run_once(NOW)
+        self.assertEqual((self.rows("outbox")[0]["status"], self.rows("outbox")[0]["attempts"]),
+                         ("pending", 1))
+        self.assertEqual(self.rows("subscription_runs")[0]["status"], "awaiting_delivery")
+        self.assertEqual(self.runs.claim_due("next-tick", 3, NOW, 900), [])
+        self.assertEqual(self.runs.history(sub.id), [])
+        worker.run_once(NOW + timedelta(seconds=10))
+        self.assertEqual(transport.messages[0], transport.messages[1])
+        self.assertEqual(self.rows("outbox")[0]["status"], "sent")
+        self.assertEqual(len(self.rows("subscription_runs")), 1)
+        self.assertEqual(self.rows("subscription_runs")[0]["id"], run.id)
+        self.assertEqual(self.rows("subscription_runs")[0]["status"], "completed")
+
     def test_database_finalization_failure_rolls_back_all_success_markers(self):
         sub, _ = self.prepare()
         worker, _ = self.worker()

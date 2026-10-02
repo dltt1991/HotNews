@@ -36,6 +36,8 @@ PYTHONPATH=src python3 -m hotnews.cli --config config.json serve
 
 管理页可查看、筛选、编辑、暂停/恢复、立即推送或取消订阅。创建入口只在飞书群。关键词修改会立即清除旧扩展词并显示“等待 Codex 更新搜索词”；下一轮任务更新后恢复可研究状态。编辑不自动推送；暂停后立即推送不恢复定时计划。页面使用 version 防止两标签页互相覆盖，冲突时要求刷新。
 
+取消会在同一事务中停止尚未领取发送的摘要、其研究运行和待投递记录，不影响确认回复或其他订阅。工作器已取得有效发送租约的消息可能已跨过网络边界，不能保证撤回；若飞书随后确认成功，仍保留事实投递历史，但不会覆盖已取消的订阅状态。未确认的取消后消息不会被再次领取发送。
+
 ## 飞书应用与公网回调
 
 在飞书开放平台创建企业自建应用，启用机器人能力，申请 `im:message.group_at_msg`（接收群聊中 @机器人 消息）及 `im:message:send_as_bot`（以应用身份发消息）；控制台若使用兼容的 `im:message` 权限，按[发送消息文档](https://open.feishu.cn/document/server-docs/im-v1/message/create)确认所需授权。订阅 `im.message.receive_v1`，发布并安装应用，将机器人加入测试群。接收范围说明见[飞书权限说明](https://open.feishu.cn/solutions/detail/ticket?lang=zh-CN)。
@@ -78,11 +80,15 @@ TLS、域名及 Tunnel 本身由操作者配置。即使使用反向代理，管
 
 技能位于 [.agents/skills/hotnews-agent/SKILL.md](.agents/skills/hotnews-agent/SKILL.md)，被任务显式调用。每轮默认最多处理 20 条事件、3 条到期订阅和 3 条扩展词更新，4 分钟软预算、15 分钟工作租约。默认出站最多尝试 5 次，退避从 10 秒倍增、上限 5 分钟；飞书明确返回更长等待时间时遵守该时间。失败的单条消息不阻塞其他订阅；连续失败达到 3 次提醒一次，成功后清零。
 
+预算不足或暂时无法处理的群事件通过 `agent defer-event` 释放为 pending，保留尝试次数、无额外回复，下轮可立即重领；`fail-event` 仅用于明确终止的不可恢复失败。飞书返回损坏的成功响应时，发送结果未知，按相同 UUID 重试，不直接记为永久失败。
+
 创建任务后观察首轮日志与 Scheduled 运行摘要；此仓库只提供技能和 prompt，不会自动修改你的账户或创建线上任务。
 
 ## Dry-run 卡片预览
 
 Codex 的 dry-run 用只读 `agent list-due` 和 `agent history` 获取上下文，再执行真实搜索。最终把选好的资讯交给下方渲染接口；该接口本身不搜索，不读取数据库或凭据，也不发送/领取工作/记录成功历史：
+
+这两个查询使用 SQLite `mode=ro` 和 `query_only`，不创建主数据库、不迁移、不修改 schema、数据、主文件时间或 WAL 内容；缺失或旧版本数据库返回安全 JSON 错误和退出码 2，应先由常驻服务初始化/迁移。为读到在线 WAL 提交，不能使用忽略 WAL 的 immutable 模式；SQLite 可能创建零字节 `-wal` 和并发协调 `-shm` 副文件，这不代表写入业务状态。
 
 ```bash
 PYTHONPATH=src python3 -m hotnews.cli dry-run <<'JSON'
@@ -119,10 +125,27 @@ PYTHONPATH=src python3 -m hotnews.cli --help
 
 ## 容器可选部署
 
-优先本机运行以使用管理页；容器默认只发布回调。复制配置后将 `callback.host` 改为 `0.0.0.0`（容器内部），仍保持 `admin.host` 为 `127.0.0.1`：
+优先本机运行以使用管理页；容器默认只发布回调。复制配置后将 `callback.host` 改为 `0.0.0.0`（容器内部），仍保持 `admin.host` 为 `127.0.0.1`。镜像默认以非 root 的数字用户 `1000:1000` 运行；Compose 可覆盖为运行宿主机 Codex 的普通用户，避免两者产生无法互写的 SQLite/WAL 文件。以该普通用户预先创建挂载目录及数据库文件、确认所有者后启动：
 
 ```bash
+export HOTNEWS_UID="$(id -u)"
+export HOTNEWS_GID="$(id -g)"
+mkdir -p data
+test -e data/hotnews.db || touch data/hotnews.db
+ls -ld data data/hotnews.db
 docker compose up -d --build
 ```
 
-Compose 从运行环境读取四个飞书变量，将 `./data` 持久化到 `/app/data`，仅映射宿主机 `127.0.0.1:8080`。Dockerfile 仅 EXPOSE 8080，8081 不发布；容器内的管理页不会直接出现在宿主机浏览器。Codex 仍运行在宿主机本地项目，必须读取同一个挂载目录下的数据库。公网 Tunnel/反向代理只连接宿主机回调端口。
+不要在 root 会话导出 UID/GID；若目录/数据库已由旧 root 容器创建，先停容器和 Scheduled Task，再把 `data`、数据库及存在的 `-wal/-shm` 所有者改为该宿主机用户（例如 `sudo chown "$HOTNEWS_UID:$HOTNEWS_GID" data data/hotnews.db`，对存在的副文件同样处理），保留文件内容。不要用 0777 代替正确所有权。
+
+不使用 Compose 时，同样显式指定用户，并从当前环境传递飞书变量：
+
+```bash
+docker build -t hotnews .
+docker run --rm --user "$HOTNEWS_UID:$HOTNEWS_GID" \
+  -e FEISHU_APP_ID -e FEISHU_APP_SECRET -e FEISHU_VERIFICATION_TOKEN -e FEISHU_ENCRYPT_KEY \
+  -p 127.0.0.1:8080:8080 \
+  -v "$PWD/config.json:/app/config.json:ro" -v "$PWD/data:/app/data" hotnews
+```
+
+Compose 从运行环境读取四个飞书变量，将 `./data` 持久化到 `/app/data`，仅映射宿主机 `127.0.0.1:8080`。Dockerfile 仅 EXPOSE 8080，8081 不发布；容器内的管理页不会直接出现在宿主机浏览器。Codex 仍运行在宿主机本地项目，必须读取同一个挂载目录下的数据库，且宿主机配置的 database_path 指向该 `data/hotnews.db`。公网 Tunnel/反向代理只连接宿主机回调端口。

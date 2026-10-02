@@ -100,8 +100,10 @@ class OutboxWorker:
                         # A remote finite delay can exceed datetime's range.
                         # Keep this row deferred rather than crashing all sends.
                         retry_at = datetime.max.replace(tzinfo=timezone.utc)
-                    self.outbox.retry(item.id, self.owner, reason, retry_at)
-                    logger.warning("Outbox item %s deferred for retry", item.id)
+                    if self.outbox.retry(item.id, self.owner, reason, retry_at, now=current_time()):
+                        logger.warning("Outbox item %s deferred for retry", item.id)
+                    else:
+                        logger.info("Outbox item %s closed after subscription cancellation", item.id)
             else:
                 # A local persistence failure propagates to the owning runtime.
                 # The lease expires for recovery using the unchanged send UUID.

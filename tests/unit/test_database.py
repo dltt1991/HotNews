@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from hotnews.domain import ValidationError
 from hotnews.storage import database as database_module
 from hotnews.storage.database import Database
 
@@ -81,6 +82,39 @@ class DatabaseTests(unittest.TestCase):
                 self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
                 self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
                 self.assertGreater(connection.execute("PRAGMA busy_timeout").fetchone()[0], 0)
+
+    def test_readonly_connection_sees_live_wal_without_mutating_main_or_wal(self):
+        self.database.migrate()
+        with self.database.connect() as writer:
+            self.create_chat(writer)
+            writer.commit()
+            paths = [Path(self.path), Path(self.path + "-wal")]
+            before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+            readonly = Database(self.path, read_only=True)
+            with readonly.connect() as reader:
+                self.assertEqual(reader.execute("SELECT chat_id FROM chats").fetchone()[0], "chat-a")
+                self.assertEqual(reader.execute("PRAGMA query_only").fetchone()[0], 1)
+                with self.assertRaises(sqlite3.OperationalError):
+                    self.create_chat(reader, "forbidden")
+            self.assertEqual([(path.read_bytes(), path.stat().st_mtime_ns) for path in paths], before)
+        with self.assertRaises(ValidationError):
+            readonly.migrate()
+
+    def test_readonly_missing_database_and_outdated_schema_fail_without_creating_or_migrating(self):
+        missing = Path(self.path).parent / "absent" / "state.sqlite"
+        with self.assertRaises(ValidationError):
+            with Database(str(missing), read_only=True).connect():
+                self.fail("missing DB must fail")
+        self.assertFalse(missing.parent.exists())
+        self.database.migrate()
+        with self.database.connect() as writer:
+            writer.execute("DELETE FROM schema_migrations WHERE version = 2")
+        path = Path(self.path)
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        with self.assertRaises(ValidationError):
+            with Database(self.path, read_only=True).connect():
+                self.fail("outdated DB must fail")
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
 
     def test_group_display_number_is_unique_and_never_reused(self):
         self.database.migrate()

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+from hotnews.domain import ValidationError
 from hotnews.storage.identity import normalized_key, topic_fingerprint
 
 
@@ -161,18 +162,50 @@ class Database:
     start of a scope when claiming work or allocating chat display numbers.
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, read_only: bool = False):
         self.path = path
+        self.read_only = read_only
+
+    @staticmethod
+    def _validate_schema(connection) -> None:
+        """Read clients must never repair an absent, old or incompatible schema."""
+        try:
+            versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+            if versions != set(range(1, SCHEMA_VERSION + 1)):
+                raise ValidationError("database schema requires migration")
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if not {"chats", "inbound_events", "subscriptions", "subscription_runs", "articles",
+                    "outbox", "deliveries", "agent_leases"}.issubset(tables):
+                raise ValidationError("database schema is incompatible")
+            for table, required in (("subscription_runs", {"subscription_version"}),
+                                    ("deliveries", {"topic_fingerprint", "event_key"}),
+                                    ("inbound_events", {"mentions_json"})):
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(" + table + ")")}
+                if not required.issubset(columns):
+                    raise ValidationError("database schema is incompatible")
+        except sqlite3.DatabaseError:
+            raise ValidationError("database schema is unavailable") from None
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.path, timeout=_BUSY_TIMEOUT_MS / 1000)
+        if self.read_only:
+            try:
+                connection = sqlite3.connect(Path(self.path).resolve().as_uri() + "?mode=ro", uri=True,
+                                             timeout=_BUSY_TIMEOUT_MS / 1000)
+            except (sqlite3.DatabaseError, OSError, ValueError):
+                raise ValidationError("database is unavailable for read-only access") from None
+        else:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(self.path, timeout=_BUSY_TIMEOUT_MS / 1000)
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout = %d" % _BUSY_TIMEOUT_MS)
             connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA journal_mode = WAL")
+            if self.read_only:
+                connection.execute("PRAGMA query_only = ON")
+                self._validate_schema(connection)
+            else:
+                connection.execute("PRAGMA journal_mode = WAL")
             with connection:
                 yield connection
         finally:
@@ -180,6 +213,8 @@ class Database:
 
     def migrate(self) -> None:
         """Apply outstanding DDL and version markers in one write transaction."""
+        if self.read_only:
+            raise ValidationError("read-only database cannot migrate")
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (

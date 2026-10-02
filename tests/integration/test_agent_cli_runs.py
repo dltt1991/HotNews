@@ -8,9 +8,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from hotnews.domain import Schedule
 from hotnews.storage.database import Database
+from hotnews.storage import database as database_module
 from hotnews.storage.events import LeaseRepository
 from hotnews.storage.subscriptions import SubscriptionRepository
 
@@ -94,6 +96,37 @@ class AgentCLIRunTests(unittest.TestCase):
         self.assertEqual(claimed[0]["subscription"]["search_terms"], ["AI models"])
         self.assertEqual(claimed[0]["run"]["lease_owner"], "worker")
         self.assertEqual(len(self.claim()), 1)
+
+    def test_read_commands_do_not_change_database_bytes_mtime_schema_or_rows(self):
+        sub = self.create()
+        path = Path(self.database.path)
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        self.assertEqual(len(self.success(self.invoke("list-due", {}))["subscriptions"]), 1)
+        self.assertEqual(self.success(self.invoke("history", {"subscription_id": sub.id})), {"history": []})
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+
+    def test_read_commands_missing_database_return_json_error_without_creating_files(self):
+        missing = self.path / "absent" / "state.sqlite"
+        self.config.write_text(json.dumps({"database_path": str(missing)}), encoding="utf-8")
+        for action, value in (("list-due", {}), ("history", {"subscription_id": "any"})):
+            with self.subTest(action=action):
+                self.invalid(self.invoke(action, value))
+                self.assertFalse(missing.parent.exists())
+
+    def test_read_commands_outdated_database_return_json_error_without_migrating(self):
+        path = self.path / "version1.db"
+        old = Database(str(path))
+        with patch.object(database_module, "_MIGRATIONS", database_module._MIGRATIONS[:1]):
+            old.migrate()
+        self.config.write_text(json.dumps({"database_path": str(path)}), encoding="utf-8")
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        for action, value in (("list-due", {}), ("history", {"subscription_id": "any"})):
+            with self.subTest(action=action):
+                self.invalid(self.invoke(action, value))
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+        self.success(self.invoke("claim-events", {"owner": "worker"}))
+        with old.connect() as connection:
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 2)
 
     def test_complete_run_prepares_one_digest_and_duplicate_completion_is_idempotent(self):
         sub = self.create()

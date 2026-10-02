@@ -179,6 +179,22 @@ class AgentCLIEventTests(unittest.TestCase):
         self.assertIsNone(row["lease_owner"])
         self.assertEqual(self.success(self.invoke("claim-events", {"owner": "other"}))["events"], [])
 
+    def test_defer_event_strict_json_releases_for_the_next_tick_without_reply(self):
+        self.event()
+        self.success(self.invoke("claim-events", {"owner": "worker"}))
+        for value in ({"event_id": "event-1", "owner": "stranger"},
+                      {"event_id": "event-1", "owner": "worker", "error": SECRET},
+                      {"event_id": "event-1", "owner": True}, {"owner": "worker"}):
+            self.validation_failure(self.invoke("defer-event", value))
+        result = self.success(self.invoke("defer-event", {"event_id": "event-1", "owner": "worker"}))
+        self.assertEqual(result, {"event_id": "event-1", "status": "pending"})
+        self.assertEqual(self.rows("outbox"), [])
+        claimed = self.success(self.invoke("claim-events", {"owner": "next-tick"}))["events"][0]
+        self.assertEqual((claimed["event_id"], claimed["attempts"]), ("event-1", 2))
+        with self.database.connect() as connection:
+            connection.execute("UPDATE inbound_events SET lease_until = ?", ("2000-01-01T00:00:00Z",))
+        self.validation_failure(self.invoke("defer-event", {"event_id": "event-1", "owner": "next-tick"}))
+
     def test_invalid_config_errors_are_sanitized(self):
         self.config.write_text(json.dumps({"database_path": SECRET, "timezone": SECRET}), encoding="utf-8")
         self.validation_failure(self.invoke("claim-events", {"owner": "worker"}))

@@ -54,10 +54,23 @@ class OutboxRepository:
         timestamp, deadline = _claim_times(owner, limit, now, lease_seconds)
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            # End cancelled unknown-outcome work after its live lease expires.
+            # This does not authorize another network attempt after cancellation.
+            cancelled = connection.execute(
+                "SELECT DISTINCT s.id FROM subscriptions s JOIN subscription_runs r ON r.subscription_id = s.id "
+                "JOIN outbox o ON o.run_id = r.id WHERE s.state = 'cancelled' AND "
+                "(o.status = 'pending' OR (o.status = 'leased' AND o.lease_until <= ?))", (timestamp,),
+            ).fetchall()
+            if cancelled:
+                from .subscriptions import SubscriptionRepository
+                for subscription in cancelled:
+                    SubscriptionRepository._cancel_unsent_work(connection, subscription["id"], timestamp)
             rows = connection.execute(
                 "SELECT id FROM outbox WHERE "
-                "(status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) "
-                "OR (status = 'leased' AND lease_until <= ?) "
+                "((status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) "
+                "OR (status = 'leased' AND lease_until <= ?)) "
+                "AND NOT EXISTS (SELECT 1 FROM subscription_runs r JOIN subscriptions s "
+                "ON s.id = r.subscription_id WHERE r.id = outbox.run_id AND s.state = 'cancelled') "
                 "ORDER BY created_at, rowid LIMIT ?", (timestamp, timestamp, limit),
             ).fetchall()
             claimed = []
@@ -119,8 +132,9 @@ class OutboxRepository:
                 from .runs import RunRepository
                 RunRepository(self.database).finish_delivery(connection, row["run_id"], now, error=error)
 
-    def retry(self, item_id: str, owner: str, error: str, next_attempt_at: datetime) -> None:
-        """Schedule another send; its next claim increments attempts exactly once."""
+    def retry(self, item_id: str, owner: str, error: str, next_attempt_at: datetime,
+              *, now: Optional[datetime] = None) -> bool:
+        """Schedule another send, or close cancelled work; return whether deferred."""
         due = _utc_text(next_attempt_at)
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -135,3 +149,14 @@ class OutboxRepository:
                 raise LeaseConflict("outbox item is not leased by this owner")
             connection.execute("UPDATE deliveries SET attempts = ?, last_error = ? "
                                "WHERE outbox_id = ? AND status = 'pending'", (row["attempts"], error, item_id))
+            if row["run_id"] is not None:
+                cancelled = connection.execute(
+                    "SELECT s.id FROM subscriptions s JOIN subscription_runs r ON r.subscription_id = s.id "
+                    "WHERE r.id = ? AND s.state = 'cancelled'", (row["run_id"],),
+                ).fetchone()
+                if cancelled is not None:
+                    from .subscriptions import SubscriptionRepository
+                    timestamp = _utc_text(now if now is not None else datetime.now(timezone.utc))
+                    SubscriptionRepository._cancel_unsent_work(connection, cancelled["id"], timestamp)
+                    return False
+            return True

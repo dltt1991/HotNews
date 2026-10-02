@@ -125,6 +125,30 @@ class QueueTests(unittest.TestCase):
         self.assertIsNone(row["lease_until"])
         self.assertEqual(self.events.claim_pending("other", 10, NOW + timedelta(days=1), 60), [])
 
+    def test_defer_event_releases_owned_live_lease_without_losing_work(self):
+        self.events.insert(self.event())
+        first = self.events.claim_pending("worker", 1, NOW, 60)[0]
+        self.events.defer("event-1", "worker", now=NOW + timedelta(seconds=1))
+        row = self.row("inbound_events", first.id)
+        self.assertEqual((row["status"], row["attempts"]), ("pending", 1))
+        self.assertIsNone(row["lease_owner"])
+        self.assertIsNone(row["lease_until"])
+        self.assertIsNone(row["result_summary"])
+        second = self.events.claim_pending("next-tick", 1, NOW + timedelta(seconds=2), 60)[0]
+        self.assertEqual((second.id, second.attempts), (first.id, 2))
+        self.assertEqual(self.outbox.claim("sender", 10, NOW, 60), [])
+
+    def test_defer_event_rejects_missing_pending_wrong_or_expired_lease(self):
+        self.events.insert(self.event())
+        for event_id in ("event-1", "missing"):
+            with self.assertRaises(LeaseConflict):
+                self.events.defer(event_id, "worker", now=NOW)
+        first = self.events.claim_pending("worker", 1, NOW, 60)[0]
+        for owner, instant in (("other", NOW), ("worker", NOW + timedelta(seconds=60))):
+            with self.subTest(owner=owner), self.assertRaises(LeaseConflict):
+                self.events.defer("event-1", owner, now=instant)
+        self.assertEqual(self.row("inbound_events", first.id)["status"], "leased")
+
     def test_unclaimed_and_missing_events_cannot_be_completed(self):
         self.events.insert(self.event())
         for event_id in ("event-1", "missing"):

@@ -42,7 +42,7 @@ class SkillContractTests(unittest.TestCase):
             r"\| `([a-z-]+)` \| `(\{.*?\})` \|", self.skill()))
         expected = {"acquire-run-lease", "renew-run-lease", "release-run-lease",
                     "claim-term-refresh", "complete-term-refresh", "fail-term-refresh",
-                    "claim-events", "apply-intent", "fail-event", "list-due", "claim-due",
+                    "claim-events", "apply-intent", "fail-event", "defer-event", "list-due", "claim-due",
                     "history", "complete-run", "fail-run"}
         self.assertEqual(set(examples), expected)
         for action in examples:
@@ -88,14 +88,18 @@ class SkillContractTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()):
                 released = invoke("fail-term-refresh")["subscription"]
             self.assertEqual(released.state, "search_terms_pending")
-            for number in (1, 2):
+            for number in (1, 2, 3):
                 events.insert({"event_id": "event-%d" % number, "message_id": "message-%d" % number,
                                "chat_id": "chat", "sender_id": "member", "text": "帮助",
                                "received_at": now})
-            self.assertEqual(len(invoke("claim-events")["events"]), 2)
+            self.assertEqual(len(invoke("claim-events")["events"]), 3)
             self.assertTrue(invoke("apply-intent")["result"].message)
             values["EVENT_ID"] = "event-2"
             self.assertEqual(invoke("fail-event")["status"], "failed")
+            values["EVENT_ID"] = "event-3"
+            self.assertEqual(invoke("defer-event")["status"], "pending")
+            self.assertEqual(invoke("claim-events")["events"][0].event_id, "event-3")
+            self.assertTrue(invoke("apply-intent")["result"].message)
             ready = subscriptions.create("chat", "member", "能源", ["能源"], ["energy"],
                                          Schedule("interval", interval_minutes=5),
                                          now=now - timedelta(days=2))
@@ -145,6 +149,13 @@ class SkillContractTests(unittest.TestCase):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, content)
         self.assertRegex(content, r"acquired=false.*退出")
+
+    def test_budget_cleanup_defers_events_and_reserves_fail_for_terminal_errors(self):
+        workflow = self.skill().split("## 一轮执行", 1)[1].split("## 意图", 1)[0]
+        self.assertRegex(workflow, r"预算.*defer-event")
+        self.assertRegex(workflow, r"暂时.*defer-event")
+        self.assertRegex(workflow, r"fail-event.*终止")
+        self.assertRegex(workflow, r"finally.*defer-event")
 
     def test_dry_run_uses_only_read_commands_and_content_preview(self):
         content = self.skill().split("## Dry-run", 1)

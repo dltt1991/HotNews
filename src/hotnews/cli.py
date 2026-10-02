@@ -35,6 +35,7 @@ def parser() -> argparse.ArgumentParser:
     actions.add_parser("claim-events", help="claim a bounded batch of queued group messages")
     actions.add_parser("apply-intent", help="validate and atomically apply one structured command")
     actions.add_parser("fail-event", help="mark one owned event as failed")
+    actions.add_parser("defer-event", help="release one unfinished owned event for the next tick")
     for action, help_text in (
         ("acquire-run-lease", "acquire the global Codex workflow lease"),
         ("renew-run-lease", "renew an unexpired global lease"),
@@ -134,6 +135,10 @@ def run_agent(action, config, value):
         owner = nonempty_string(value["owner"], "owner")
         event_id = nonempty_string(value["event_id"], "event_id")
         nonempty_string(value["error"], "error")
+    elif action == "defer-event":
+        object_fields(value, ("event_id", "owner"))
+        owner = nonempty_string(value["owner"], "owner")
+        event_id = nonempty_string(value["event_id"], "event_id")
     elif action in ("acquire-run-lease", "renew-run-lease", "release-run-lease"):
         object_fields(value, ("owner",))
         owner = nonempty_string(value["owner"], "owner")
@@ -174,6 +179,11 @@ def run_agent(action, config, value):
             nonempty_string(value["error"], "error")
     else:
         raise ValidationError("unsupported agent command")
+    if action in ("list-due", "history"):
+        runs = RunRepository(Database(config.database_path, read_only=True))
+        if action == "list-due":
+            return {"subscriptions": runs.list_due(datetime.now(timezone.utc), limit)}
+        return {"history": runs.history(subscription_id)}
     database = Database(config.database_path)
     database.migrate()
     events = EventRepository(database)
@@ -182,6 +192,9 @@ def run_agent(action, config, value):
         return {"events": events.claim_pending(owner, limit, now, config.worker.lease_seconds)}
     if action == "apply-intent":
         return {"result": CommandService(database).apply(event_id, owner, intent)}
+    if action == "defer-event":
+        events.defer(event_id, owner, now=now)
+        return {"event_id": event_id, "status": "pending"}
     if action == "acquire-run-lease":
         return {"acquired": LeaseRepository(database).acquire("hotnews-agent", owner, now, config.worker.lease_seconds)}
     if action == "renew-run-lease":
@@ -198,13 +211,9 @@ def run_agent(action, config, value):
         sys.stderr.write("Search-term refresh failed; work released for retry.\n")
         return {"subscription": updated}
     runs = RunRepository(database)
-    if action == "list-due":
-        return {"subscriptions": runs.list_due(now, limit)}
     if action == "claim-due":
         claimed = runs.claim_due(owner, limit, now, config.worker.lease_seconds)
         return {"runs": [{"run": run, "subscription": subscriptions.get(run.subscription_id)} for run in claimed]}
-    if action == "history":
-        return {"history": runs.history(subscription_id)}
     if action == "complete-run":
         return {"run": runs.complete(run_id, owner, results, now=now, search_window_days=window)}
     if action == "fail-run":

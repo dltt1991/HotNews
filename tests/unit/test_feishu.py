@@ -412,11 +412,11 @@ class FeishuClientTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(FeishuAPIError):
                 FeishuClient(config(), ScriptedTransport([token(), response(payload)])).send_text("oc", "text", "key")
 
-    def test_non_json_errors_keep_http_retry_metadata_but_malformed_success_is_permanent(self):
+    def test_non_json_errors_keep_http_retry_metadata_and_malformed_success_is_unknown(self):
         cases = ((429, {"Retry-After": "600"}, True, 600),
                  (503, {"x-ogw-ratelimit-reset": "900", "Retry-After": "600"}, True, 900),
                  (500, {"x-ogw-ratelimit-reset": "invalid", "Retry-After": "600"}, True, 600),
-                 (200, {"Retry-After": "600"}, False, None),
+                 (200, {"Retry-After": "600"}, True, None),
                  (403, {}, False, None))
         for status, headers, retryable, delay in cases:
             for body in (b"<html>test-app-secret</html>", b"", b"{\"truncated\":", b"\xff"):
