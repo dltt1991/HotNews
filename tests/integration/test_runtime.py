@@ -614,23 +614,18 @@ class ServiceTests(unittest.TestCase):
         from hotnews.runtime import run_service
         with tempfile.TemporaryDirectory() as directory:
             config = AppConfig(database_path=str(Path(directory) / "new.db"),
-                               callback=ServerConfig("127.0.0.1", 8180), admin=ServerConfig("127.0.0.1", 8181))
+                               admin=ServerConfig("127.0.0.1", 8181))
             transport = Transport()
-            client = FeishuClient(FeishuConfig("app", SECRET, "verification"), transport)
+            client = FeishuClient(FeishuConfig("app", SECRET), transport)
             stop = threading.Event()
             started = []
             ready = threading.Event()
             lock = threading.Lock()
 
-            def boundary(name, received_config, received_stop, feishu_config=None):
+            def boundary(name, received_stop):
                 with Database(config.database_path).connect() as connection:
                     self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 2)
                 self.assertIs(received_stop, stop)
-                if name == "callback":
-                    self.assertEqual(feishu_config.bot_open_id, "ou_bot")
-                    self.assertEqual(received_config.callback.port, 8180)
-                else:
-                    self.assertEqual((received_config.admin.host, received_config.admin.port), ("127.0.0.1", 8181))
                 with lock:
                     started.append(name)
                     if len(started) == 2:
@@ -638,13 +633,21 @@ class ServiceTests(unittest.TestCase):
                         stop.set()
                 stop.wait(2)
 
+            class Connection:
+                def __init__(inner, feishu_config, intake, status):
+                    self.assertEqual(feishu_config.bot_open_id, "ou_bot")
+                    self.assertEqual(intake.bot_open_id, "ou_bot")
+                    self.assertEqual(status.snapshot().state, "starting")
+                def run(inner, received_stop):
+                    boundary("connection", received_stop)
+
             with patch("hotnews.runtime.load_feishu_config", return_value=client.config), \
                  patch("hotnews.runtime.FeishuClient", return_value=client), \
-                 patch("hotnews.runtime.serve_gateway", side_effect=lambda c, s, f: boundary("callback", c, s, f)), \
-                 patch("hotnews.runtime.serve_admin", side_effect=lambda c, s: boundary("admin", c, s)):
+                 patch("hotnews.runtime.FeishuLongConnection", Connection), \
+                 patch("hotnews.runtime.serve_admin", side_effect=lambda c, s: boundary("admin", s)):
                 run_service(config, stop)
             self.assertTrue(ready.is_set())
-            self.assertEqual(sorted(started), ["admin", "callback"])
+            self.assertEqual(sorted(started), ["admin", "connection"])
             self.assertEqual(transport.bot_requests, 1)
             self.assertTrue(stop.is_set())
 
@@ -659,8 +662,14 @@ class ServiceTests(unittest.TestCase):
                 s.wait(2)
                 finished.set()
 
-            with patch("hotnews.runtime.load_feishu_config", return_value=FeishuConfig("app", SECRET, "v", bot_open_id="ou_bot")), \
-                 patch("hotnews.runtime.serve_gateway", side_effect=RuntimeError(SECRET)), \
+            class BrokenConnection:
+                def __init__(inner, *args):
+                    pass
+                def run(inner, stop_event):
+                    raise RuntimeError(SECRET)
+
+            with patch("hotnews.runtime.load_feishu_config", return_value=FeishuConfig("app", SECRET, bot_open_id="ou_bot")), \
+                 patch("hotnews.runtime.FeishuLongConnection", BrokenConnection), \
                  patch("hotnews.runtime.serve_admin", side_effect=peer):
                 with self.assertLogs("hotnews.runtime", level="ERROR") as logs:
                     with self.assertRaises(RuntimeServiceError) as caught:
@@ -668,11 +677,10 @@ class ServiceTests(unittest.TestCase):
             self.assertTrue(stop.is_set())
             self.assertTrue(finished.is_set())
             self.assertNotIn(SECRET, str(caught.exception) + str(logs.output))
-            self.assertIn("callback", str(caught.exception))
+            self.assertIn("connection", str(caught.exception))
 
-    def test_invalid_admin_or_overlapping_listener_rejected_before_startup(self):
+    def test_nonlocal_admin_is_rejected_before_startup(self):
         from hotnews.runtime import run_service
-        for config in (replace(AppConfig(), admin=ServerConfig("0.0.0.0", 8081)),
-                       replace(AppConfig(), callback=ServerConfig("0.0.0.0", 8081))):
-            with self.subTest(config=config), self.assertRaises(ValidationError):
-                run_service(config, threading.Event())
+        config = replace(AppConfig(), admin=ServerConfig("0.0.0.0", 8081))
+        with self.assertRaises(ValidationError):
+            run_service(config, threading.Event())

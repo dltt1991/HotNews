@@ -13,7 +13,8 @@ from .admin.server import serve_admin
 from .config import AppConfig, load_feishu_config
 from .domain import ValidationError
 from .feishu.client import FeishuAPIError, FeishuClient
-from .feishu.gateway import serve_gateway
+from .feishu.connection import ConnectionStatus, FeishuLongConnection
+from .feishu.intake import EventIntake
 from .storage.database import Database
 from .storage.outbox import OutboxRepository
 
@@ -117,11 +118,9 @@ class OutboxWorker:
 
 
 def run_service(config: AppConfig, stop_event: threading.Event) -> None:
-    """Migrate, resolve bot identity, then run callback/admin/outbox together."""
+    """Migrate, resolve bot identity, then run connection/admin/outbox together."""
     if config.admin.host != "127.0.0.1":
         raise ValidationError("admin must bind to 127.0.0.1")
-    if config.callback.port == config.admin.port:
-        raise ValidationError("callback and admin require distinct ports")
     if stop_event.is_set():
         return
     Database(config.database_path).migrate()
@@ -129,6 +128,9 @@ def run_service(config: AppConfig, stop_event: threading.Event) -> None:
     client = FeishuClient(feishu_config)
     feishu_config = replace(feishu_config, bot_open_id=client.get_bot_open_id())
     worker = OutboxWorker(config, client)
+    status = ConnectionStatus()
+    connection = FeishuLongConnection(
+        feishu_config, EventIntake(Database(config.database_path), feishu_config.bot_open_id), status)
     failures = Queue()
 
     def supervise(name, target, *args):
@@ -144,8 +146,8 @@ def run_service(config: AppConfig, stop_event: threading.Event) -> None:
             stop_event.set()
 
     threads = [
-        threading.Thread(name="hotnews-callback", target=supervise,
-                         args=("callback", serve_gateway, config, stop_event, feishu_config)),
+        threading.Thread(name="hotnews-connection", target=supervise,
+                         args=("connection", connection.run, stop_event)),
         threading.Thread(name="hotnews-admin", target=supervise,
                          args=("admin", serve_admin, config, stop_event)),
         threading.Thread(name="hotnews-outbox", target=supervise,

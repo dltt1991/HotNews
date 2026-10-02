@@ -1,10 +1,5 @@
 {
   "database_path": "data/hotnews.db",
-  "callback": {
-    "host": "127.0.0.1",
-    "port": 8080,
-    "max_body_bytes": 1048576
-  },
   "admin": {
     "host": "127.0.0.1",
     "port": 8081
