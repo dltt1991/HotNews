@@ -131,6 +131,20 @@ class DatabaseTests(unittest.TestCase):
                     with self.assertRaises(sqlite3.IntegrityError):
                         connection.execute(sql, ("duplicate", event_id, message_id, NOW))
 
+    def test_inbound_mentions_archive_defaults_to_an_empty_array_and_disallows_null(self):
+        self.database.migrate()
+        with self.database.connect() as connection:
+            self.create_chat(connection)
+            connection.execute(
+                "INSERT INTO inbound_events "
+                "(id, event_id, message_id, chat_id, sender_id, raw_text, text, received_at) "
+                "VALUES ('inbound-a', 'event-a', 'message-a', 'chat-a', 'member', '@bot AI', 'AI', ?)",
+                (NOW,),
+            )
+            self.assertEqual(connection.execute("SELECT mentions_json FROM inbound_events").fetchone()[0], "[]")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("UPDATE inbound_events SET mentions_json = NULL")
+
     def test_article_url_hash_is_unique(self):
         self.database.migrate()
         with self.database.connect() as connection:

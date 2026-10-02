@@ -2,7 +2,8 @@
 
 from datetime import datetime, timezone
 import json
-from typing import List
+import sqlite3
+from typing import List, Optional
 from uuid import uuid4
 
 from hotnews.domain import LeaseConflict, OutboxItem
@@ -24,8 +25,12 @@ class OutboxRepository:
     def __init__(self, database: Database):
         self.database = database
 
-    def enqueue(self, chat_id: str, kind: str, content: dict, idempotency_key: str) -> str:
-        """Return the durable ID, preserving the first payload for a business key."""
+    def enqueue(self, chat_id: str, kind: str, content: dict, idempotency_key: str,
+                connection: Optional[sqlite3.Connection] = None) -> str:
+        """Enqueue in an owned or supplied transaction, preserving the first payload."""
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                return self.enqueue(chat_id, kind, content, idempotency_key, connection=owned_connection)
         if not isinstance(content, dict):
             raise TypeError("outbox content must be a dict")
         # Escape Unicode so even JSON strings containing lone surrogates can be
@@ -35,15 +40,14 @@ class OutboxRepository:
             raise ValueError("outbox content must round-trip through JSON without changes")
         item_id = str(uuid4())
         created_at = _utc_text(datetime.now(timezone.utc))
-        with self.database.connect() as connection:
-            connection.execute("INSERT INTO chats (chat_id) VALUES (?) ON CONFLICT DO NOTHING", (chat_id,))
-            connection.execute(
-                "INSERT INTO outbox (id, chat_id, kind, content_json, idempotency_key, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING",
-                (item_id, chat_id, kind, content_json, idempotency_key, created_at),
-            )
-            return connection.execute("SELECT id FROM outbox WHERE idempotency_key = ?",
-                                      (idempotency_key,)).fetchone()["id"]
+        connection.execute("INSERT INTO chats (chat_id) VALUES (?) ON CONFLICT DO NOTHING", (chat_id,))
+        connection.execute(
+            "INSERT INTO outbox (id, chat_id, kind, content_json, idempotency_key, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING",
+            (item_id, chat_id, kind, content_json, idempotency_key, created_at),
+        )
+        return connection.execute("SELECT id FROM outbox WHERE idempotency_key = ?",
+                                  (idempotency_key,)).fetchone()["id"]
 
     def claim(self, owner: str, limit: int, now: datetime, lease_seconds: int) -> List[OutboxItem]:
         """Atomically claim FIFO due/expired rows, incrementing send attempts."""

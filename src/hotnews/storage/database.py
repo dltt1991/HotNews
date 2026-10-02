@@ -24,6 +24,7 @@ _VERSION_1 = (
         sender_id TEXT NOT NULL,
         raw_text TEXT NOT NULL,
         text TEXT NOT NULL,
+        mentions_json TEXT NOT NULL DEFAULT '[]',
         received_at TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending'
             CHECK (status IN ('pending', 'leased', 'completed', 'failed')),

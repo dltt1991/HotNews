@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import tempfile
 import threading
@@ -55,6 +56,29 @@ class QueueTests(unittest.TestCase):
         event = NormalizedEvent("event-a", "message-a", "chat-a", "member", "新闻", NOW)
         self.assertTrue(self.events.insert(event))
         self.assertEqual(self.events.claim_pending("worker", 1, NOW, 60)[0].text, "新闻")
+
+    def test_event_mentions_are_archived_as_stable_json_without_changing_business_records(self):
+        mentions = [{"name": '机器人 "中文"', "id": {"open_id": "ou_bot"}, "key": "@_user_1"}]
+        self.events.insert(self.event(mentions=mentions))
+        claimed = self.events.claim_pending("worker", 1, NOW, 60)[0]
+        serialized = self.row("inbound_events", claimed.id)["mentions_json"]
+        self.assertEqual(json.loads(serialized), mentions)
+        reordered = [{"key": "@_user_1", "id": {"open_id": "ou_bot"}, "name": '机器人 "中文"'}]
+        self.events.insert(self.event(2, mentions=reordered))
+        other = self.events.claim_pending("worker", 1, NOW, 60)[0]
+        self.assertEqual(self.row("inbound_events", other.id)["mentions_json"], serialized)
+        self.assertEqual(claimed.text, "新闻")
+
+    def test_event_without_mentions_has_an_empty_archive(self):
+        self.events.insert(self.event())
+        claimed = self.events.claim_pending("worker", 1, NOW, 60)[0]
+        self.assertEqual(self.row("inbound_events", claimed.id)["mentions_json"], "[]")
+
+    def test_invalid_mentions_archive_is_rejected_without_inserting_an_event(self):
+        for mentions in (None, {}, [{"id": object()}], [{"name": float("nan")}], [{1: "bad key"}]):
+            with self.subTest(mentions=mentions), self.assertRaises((TypeError, ValueError)):
+                self.events.insert(self.event(mentions=mentions))
+        self.assertEqual(self.events.claim_pending("worker", 10, NOW, 60), [])
 
     def test_event_claim_is_fifo_and_returns_current_lease(self):
         for number in (3, 1, 2):

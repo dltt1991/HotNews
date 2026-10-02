@@ -1,6 +1,8 @@
 """Durable inbound event queue and global agent coordination leases."""
 
 from datetime import datetime, timedelta, timezone
+import json
+import sqlite3
 from typing import List, Mapping, Optional, Union
 from uuid import uuid4
 
@@ -50,24 +52,35 @@ class EventRepository:
     def __init__(self, database: Database):
         self.database = database
 
-    def insert(self, event: Union[NormalizedEvent, Mapping[str, object]]) -> bool:
-        """Insert a normalized event; mapping inputs may also include raw_text."""
+    def insert(self, event: Union[NormalizedEvent, Mapping[str, object]],
+               connection: Optional[sqlite3.Connection] = None) -> bool:
+        """Insert an event, optionally participating in the caller's transaction."""
+        if connection is None:
+            with self.database.connect() as owned_connection:
+                return self.insert(event, connection=owned_connection)
         if isinstance(event, NormalizedEvent):
             values = vars(event)
         else:
             values = event
         received_at = _utc_text(values["received_at"])
-        with self.database.connect() as connection:
-            connection.execute("INSERT INTO chats (chat_id) VALUES (?) ON CONFLICT DO NOTHING",
-                               (values["chat_id"],))
-            cursor = connection.execute(
-                "INSERT INTO inbound_events "
-                "(id, event_id, message_id, chat_id, sender_id, raw_text, text, received_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (str(uuid4()), values["event_id"], values["message_id"], values["chat_id"],
-                 values["sender_id"], values.get("raw_text", values["text"]), values["text"], received_at),
-            )
-            return cursor.rowcount == 1
+        mentions = values.get("mentions", [])
+        if not isinstance(mentions, list):
+            raise TypeError("event mentions must be a list")
+        mentions_json = json.dumps(mentions, ensure_ascii=True, sort_keys=True, allow_nan=False,
+                                   separators=(",", ":"))
+        if json.loads(mentions_json) != mentions:
+            raise ValueError("event mentions must round-trip through JSON without changes")
+        connection.execute("INSERT INTO chats (chat_id) VALUES (?) ON CONFLICT DO NOTHING",
+                           (values["chat_id"],))
+        cursor = connection.execute(
+            "INSERT INTO inbound_events "
+            "(id, event_id, message_id, chat_id, sender_id, raw_text, text, mentions_json, received_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            (str(uuid4()), values["event_id"], values["message_id"], values["chat_id"],
+             values["sender_id"], values.get("raw_text", values["text"]), values["text"],
+             mentions_json, received_at),
+        )
+        return cursor.rowcount == 1
 
     def claim_pending(self, owner: str, limit: int, now: datetime,
                       lease_seconds: int) -> List[InboundEvent]:
