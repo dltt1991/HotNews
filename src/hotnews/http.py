@@ -1,9 +1,41 @@
 import json
-from typing import Any, Dict, Optional
-from urllib.request import Request, urlopen
+from typing import Any, Dict, Mapping, Optional, Protocol
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+
+from .domain import HttpResponse
 
 
 USER_AGENT = "hotnews-agent/0.1 (+https://localhost)"
+
+
+class HttpTransport(Protocol):
+    """Small synchronous HTTP boundary; callers own JSON and retry policy."""
+
+    def request(self, method: str, url: str, headers: Optional[Mapping[str, str]] = None,
+                body: Optional[bytes] = None, timeout: float = 15) -> HttpResponse:
+        ...
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class UrllibTransport:
+    """Return HTTP failures as responses without forwarding credentials on redirects."""
+
+    def request(self, method: str, url: str, headers: Optional[Mapping[str, str]] = None,
+                body: Optional[bytes] = None, timeout: float = 15) -> HttpResponse:
+        request = Request(url, data=body, method=method,
+                          headers={"User-Agent": USER_AGENT, **dict(headers or {})})
+        opener = build_opener(_NoRedirect())
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                return HttpResponse(response.status, dict(response.headers.items()), response.read())
+        except HTTPError as error:
+            with error:
+                return HttpResponse(error.code, dict(error.headers.items()), error.read())
 
 
 def get_bytes(url: str, timeout: int = 15) -> bytes:

@@ -14,6 +14,7 @@ class FeishuConfig:
     app_secret: str
     verification_token: str
     encrypt_key: Optional[str] = None
+    bot_open_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
