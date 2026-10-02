@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _BUSY_TIMEOUT_MS = 5000
 
 _VERSION_1 = (
@@ -139,7 +139,12 @@ _VERSION_1 = (
         lease_until TEXT NOT NULL
     )""",
 )
-_MIGRATIONS = ((1, _VERSION_1),)
+_VERSION_2 = (
+    "ALTER TABLE subscription_runs ADD COLUMN subscription_version INTEGER NOT NULL DEFAULT 1",
+    "UPDATE subscription_runs SET subscription_version = "
+    "(SELECT version FROM subscriptions WHERE id = subscription_runs.subscription_id)",
+)
+_MIGRATIONS = ((1, _VERSION_1), (2, _VERSION_2))
 
 
 class Database:

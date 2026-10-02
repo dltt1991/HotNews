@@ -231,10 +231,13 @@ class SubscriptionRepository:
                                                                 (row["id"],)).fetchone()))
             return claimed
 
-    def _owned_terms(self, connection, id: str, owner: str, expected_version: int):
+    def _owned_terms(self, connection, id: str, owner: str, expected_version: int, timestamp: str):
+        if connection.execute("SELECT 1 FROM subscriptions WHERE id = ?", (id,)).fetchone() is None:
+            raise ValidationError("unknown subscription")
         row = self._current(connection, id, expected_version)
         if (not isinstance(owner, str) or not owner.strip() or row["lease_owner"] != owner
-                or row["state"] not in ("search_terms_pending", "paused")):
+                or row["state"] not in ("search_terms_pending", "paused")
+                or row["lease_until"] is None or row["lease_until"] <= timestamp):
             raise LeaseConflict("term refresh is not leased by this owner")
         return row
 
@@ -243,7 +246,7 @@ class SubscriptionRepository:
         timestamp = _utc_text(_now(now))
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = self._owned_terms(connection, id, owner, expected_version)
+            row = self._owned_terms(connection, id, owner, expected_version, timestamp)
             terms = _strings(terms, "search_terms")
             if not terms:
                 raise ValidationError("search_terms must not be empty")
@@ -257,7 +260,7 @@ class SubscriptionRepository:
         timestamp = _utc_text(_now(now))
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._owned_terms(connection, id, owner, expected_version)
+            self._owned_terms(connection, id, owner, expected_version, timestamp)
             return self._save(connection, id, timestamp)
 
     def request_manual_run(self, id: str, expected_version: int,
@@ -274,8 +277,8 @@ class SubscriptionRepository:
         if row["state"] not in ("ready", "paused") or not json.loads(row["search_terms_json"]):
             raise ValidationError("manual run requires available search terms")
         connection.execute(
-            "INSERT INTO subscription_runs (id, subscription_id, trigger, created_at) VALUES (?, ?, 'manual', ?)",
-            (run_id, id, timestamp),
+            "INSERT INTO subscription_runs (id, subscription_id, trigger, created_at, subscription_version) "
+            "VALUES (?, ?, 'manual', ?, ?)", (run_id, id, timestamp, row["version"] + 1),
         )
         self._save(connection, id, timestamp)
         return run_id

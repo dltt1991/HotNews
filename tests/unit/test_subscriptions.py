@@ -232,6 +232,18 @@ class SubscriptionTests(unittest.TestCase):
         self.assertIsNone(self.row(subscription.id)["lease_owner"])
         self.assertEqual(self.repository.claim_pending_terms("other", 1, NOW, 60)[0].version, 4)
 
+    def test_expired_term_owner_cannot_complete_or_fail_at_deadline(self):
+        subscription = self.create(search_terms=[])
+        claimed = self.repository.claim_pending_terms("worker", 1, NOW, 60)[0]
+        deadline = NOW + timedelta(seconds=60)
+        with self.assertRaises(LeaseConflict):
+            self.repository.complete_search_terms(subscription.id, "worker", claimed.version,
+                                                  ["AI"], now=deadline)
+        with self.assertRaises(LeaseConflict):
+            self.repository.fail_search_terms(subscription.id, "worker", claimed.version,
+                                              "failure", now=deadline)
+        self.assertEqual(self.repository.get(subscription.id).search_terms, ())
+
     def test_paused_keyword_refresh_preserves_pause_and_resume_pending_semantics(self):
         subscription = self.create()
         paused = self.repository.pause(subscription.id, 1, now=NOW)

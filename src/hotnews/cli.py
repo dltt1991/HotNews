@@ -7,9 +7,11 @@ import sys
 from .commands.schema import nonempty_string, object_fields, parse_intent, parse_json, positive_integer
 from .commands.service import CommandService, json_default
 from .config import load_config
-from .domain import LeaseConflict, ValidationError, VersionConflict
+from .domain import LeaseConflict, NewsResult, ValidationError, VersionConflict
 from .storage.database import Database
-from .storage.events import EventRepository
+from .storage.events import EventRepository, LeaseRepository, _datetime, _utc_text
+from .storage.runs import RunRepository
+from .storage.subscriptions import SubscriptionRepository
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -36,6 +38,20 @@ def parser() -> argparse.ArgumentParser:
     actions.add_parser("claim-events", help="claim a bounded batch of queued group messages")
     actions.add_parser("apply-intent", help="validate and atomically apply one structured command")
     actions.add_parser("fail-event", help="mark one owned event as failed")
+    for action, help_text in (
+        ("acquire-run-lease", "acquire the global Codex workflow lease"),
+        ("renew-run-lease", "renew an unexpired global lease"),
+        ("release-run-lease", "release an owned global lease"),
+        ("claim-term-refresh", "claim subscriptions needing new search terms"),
+        ("complete-term-refresh", "save validated terms for a leased subscription version"),
+        ("fail-term-refresh", "release unsuccessful term refresh work"),
+        ("claim-due", "claim a bounded batch of scheduled or manual runs"),
+        ("list-due", "preview eligible subscriptions without leasing"),
+        ("history", "read confirmed article history for a subscription topic"),
+        ("complete-run", "prepare validated news for durable delivery"),
+        ("fail-run", "fail owned research work and update its failure counter"),
+    ):
+        actions.add_parser(action, help=help_text)
     return result
 
 
@@ -52,6 +68,31 @@ def read_input():
 
 def write_output(value):
     sys.stdout.write(json.dumps(value, default=json_default, ensure_ascii=True, allow_nan=False) + "\n")
+
+
+def parse_news_results(value):
+    """Dates must be explicit aware timestamps; unknown result fields fail closed."""
+    if not isinstance(value, list) or len(value) > 10:
+        raise ValidationError("results must be an array of at most ten items")
+    results = []
+    for item in value:
+        object_fields(item, ("title", "url", "source", "published_at", "summary", "event_key"), ("references",))
+        for name in ("title", "url", "source", "published_at", "summary", "event_key"):
+            nonempty_string(item[name], name)
+        try:
+            published = _datetime(item["published_at"])
+            _utc_text(published)
+        except (ValueError, TypeError):
+            raise ValidationError("publication date must be a timezone-aware timestamp") from None
+        references = item.get("references", [])
+        if not isinstance(references, list) or len(references) > 2:
+            raise ValidationError("references must contain at most two URLs")
+        results.append(NewsResult(
+            title=item["title"], url=item["url"], source=item["source"], published_at=published,
+            summary=item["summary"], event_key=item["event_key"],
+            references=tuple(nonempty_string(reference, "reference") for reference in references),
+        ))
+    return results
 
 
 def run_agent(action, config, value):
@@ -72,6 +113,44 @@ def run_agent(action, config, value):
         owner = nonempty_string(value["owner"], "owner")
         event_id = nonempty_string(value["event_id"], "event_id")
         nonempty_string(value["error"], "error")
+    elif action in ("acquire-run-lease", "renew-run-lease", "release-run-lease"):
+        object_fields(value, ("owner",))
+        owner = nonempty_string(value["owner"], "owner")
+    elif action in ("claim-due", "claim-term-refresh", "list-due"):
+        object_fields(value, () if action == "list-due" else ("owner",), ("limit",))
+        if action != "list-due":
+            owner = nonempty_string(value["owner"], "owner")
+        limit = positive_integer(value.get("limit", config.worker.max_due_subscriptions), "limit")
+        if limit > config.worker.max_due_subscriptions:
+            raise ValidationError("claim limit exceeds configured subscription batch")
+    elif action in ("complete-term-refresh", "fail-term-refresh"):
+        object_fields(value, ("subscription_id", "owner", "expected_version",
+                              "terms" if action == "complete-term-refresh" else "error"))
+        subscription_id = nonempty_string(value["subscription_id"], "subscription_id")
+        owner = nonempty_string(value["owner"], "owner")
+        version = positive_integer(value["expected_version"], "expected_version")
+        if action == "complete-term-refresh":
+            terms = value["terms"]
+            if not isinstance(terms, list) or not terms:
+                raise ValidationError("terms must be a non-empty array")
+            terms = [nonempty_string(term, "term") for term in terms]
+        else:
+            nonempty_string(value["error"], "error")
+    elif action == "history":
+        object_fields(value, ("subscription_id",))
+        subscription_id = nonempty_string(value["subscription_id"], "subscription_id")
+    elif action in ("complete-run", "fail-run"):
+        object_fields(value, ("run_id", "owner", "results" if action == "complete-run" else "error"),
+                      ("search_window_days",) if action == "complete-run" else ())
+        run_id = nonempty_string(value["run_id"], "run_id")
+        owner = nonempty_string(value["owner"], "owner")
+        if action == "complete-run":
+            results = parse_news_results(value["results"])
+            window = value.get("search_window_days", 30)
+            if type(window) is not int or window not in (1, 7, 30):
+                raise ValidationError("search window must be 1, 7 or 30 days")
+        else:
+            nonempty_string(value["error"], "error")
     else:
         raise ValidationError("unsupported agent command")
     database = Database(config.database_path)
@@ -82,6 +161,33 @@ def run_agent(action, config, value):
         return {"events": events.claim_pending(owner, limit, now, config.worker.lease_seconds)}
     if action == "apply-intent":
         return {"result": CommandService(database).apply(event_id, owner, intent)}
+    if action == "acquire-run-lease":
+        return {"acquired": LeaseRepository(database).acquire("hotnews-agent", owner, now, config.worker.lease_seconds)}
+    if action == "renew-run-lease":
+        return {"renewed": LeaseRepository(database).renew("hotnews-agent", owner, now, config.worker.lease_seconds)}
+    if action == "release-run-lease":
+        return {"released": LeaseRepository(database).release("hotnews-agent", owner)}
+    subscriptions = SubscriptionRepository(database)
+    if action == "claim-term-refresh":
+        return {"subscriptions": subscriptions.claim_pending_terms(owner, limit, now, config.worker.lease_seconds)}
+    if action == "complete-term-refresh":
+        return {"subscription": subscriptions.complete_search_terms(subscription_id, owner, version, terms, now=now)}
+    if action == "fail-term-refresh":
+        updated = subscriptions.fail_search_terms(subscription_id, owner, version, "term refresh failed", now=now)
+        sys.stderr.write("Search-term refresh failed; work released for retry.\n")
+        return {"subscription": updated}
+    runs = RunRepository(database)
+    if action == "list-due":
+        return {"subscriptions": runs.list_due(now, limit)}
+    if action == "claim-due":
+        claimed = runs.claim_due(owner, limit, now, config.worker.lease_seconds)
+        return {"runs": [{"run": run, "subscription": subscriptions.get(run.subscription_id)} for run in claimed]}
+    if action == "history":
+        return {"history": runs.history(subscription_id)}
+    if action == "complete-run":
+        return {"run": runs.complete(run_id, owner, results, now=now, search_window_days=window)}
+    if action == "fail-run":
+        return {"run": runs.fail(run_id, owner, "news research failed", now=now)}
     # Model-provided diagnostics may contain message text or credentials. Keep
     # only a fixed safe reason in durable state, never their untrusted content.
     events.fail(event_id, owner, "command processing failed", now=now)

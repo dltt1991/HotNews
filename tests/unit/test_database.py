@@ -2,7 +2,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from hotnews.storage import database as database_module
 from hotnews.storage.database import Database
 
 
@@ -64,12 +66,12 @@ class DatabaseTests(unittest.TestCase):
         with self.database.connect() as connection:
             self.create_chat(connection)
             self.create_subscription(connection)
-            original = tuple(connection.execute("SELECT * FROM schema_migrations").fetchone())
+            original = [tuple(row) for row in connection.execute("SELECT * FROM schema_migrations")]
         self.database.migrate()
         self.database.migrate()
         with self.database.connect() as connection:
             self.assertEqual([tuple(row) for row in connection.execute("SELECT * FROM schema_migrations")],
-                             [original])
+                             original)
             self.assertEqual(connection.execute("SELECT topic FROM subscriptions").fetchone()[0], "AI")
 
     def test_connections_enable_wal_foreign_keys_and_busy_timeout(self):
@@ -225,11 +227,28 @@ class DatabaseTests(unittest.TestCase):
     def test_newer_schema_is_rejected_without_downgrade(self):
         self.database.migrate()
         with self.database.connect() as connection:
-            connection.execute("UPDATE schema_migrations SET version = 2")
+            connection.execute("INSERT INTO schema_migrations VALUES (99, ?)", (NOW,))
         with self.assertRaisesRegex(RuntimeError, "newer"):
             self.database.migrate()
         with self.database.connect() as connection:
-            self.assertEqual(connection.execute("SELECT version FROM schema_migrations").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 99)
+
+    def test_version_one_upgrade_keeps_runs_and_adds_subscription_version_snapshot(self):
+        with patch.object(database_module, "_MIGRATIONS", database_module._MIGRATIONS[:1]):
+            self.database.migrate()
+        with self.database.connect() as connection:
+            self.create_chat(connection)
+            self.create_subscription(connection)
+            self.create_run(connection)
+            connection.execute("UPDATE subscriptions SET version = 7 WHERE id = 'sub-a'")
+        self.database.migrate()
+        with self.database.connect() as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(subscription_runs)")}
+            self.assertIn("subscription_version", columns)
+            row = connection.execute("SELECT id, subscription_version FROM subscription_runs").fetchone()
+            self.assertEqual(tuple(row), ("run-a", 7))
+            self.assertEqual([row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
+                             [1, 2])
 
     def test_missing_database_parent_directory_is_created(self):
         nested_path = str(Path(self.path).parent / "nested" / "data" / "state.sqlite")
