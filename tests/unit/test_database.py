@@ -250,6 +250,35 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual([row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
                              [1, 2])
 
+    def test_version_one_upgrade_snapshots_existing_delivery_identity_for_future_topic_edits(self):
+        with patch.object(database_module, "_MIGRATIONS", database_module._MIGRATIONS[:1]):
+            self.database.migrate()
+        with self.database.connect() as connection:
+            self.create_chat(connection)
+            self.create_subscription(connection)
+            self.create_article(connection)
+            self.create_run(connection)
+            connection.execute("UPDATE subscriptions SET keywords_json = '[\" AI \", \"Large   Models\"]'")
+            connection.execute("UPDATE chats SET next_display_number = 2 WHERE chat_id = 'chat-a'")
+            connection.execute("UPDATE articles SET event_key = ' Event-A '")
+            connection.execute("INSERT INTO deliveries (id, subscription_id, article_id, run_id, status) "
+                               "VALUES ('delivery', 'sub-a', 'article-a', 'run-a', 'sent')")
+        self.database.migrate()
+        from hotnews.storage.runs import RunRepository
+        from hotnews.storage.subscriptions import SubscriptionRepository
+        with self.database.connect() as connection:
+            connection.execute("UPDATE subscriptions SET keywords_json = '[\"energy\"]'")
+        recreated = SubscriptionRepository(self.database).create(
+            "chat-a", "member", "AI", ["large models", "ai"], search_terms=["AI"],
+        )
+        self.assertEqual([item["event_key"] for item in RunRepository(self.database).history(recreated.id)], ["event-a"])
+        with self.database.connect() as connection:
+            identity = connection.execute("SELECT topic_fingerprint, event_key FROM deliveries").fetchone()
+            original = tuple(identity)
+        self.database.migrate()
+        with self.database.connect() as connection:
+            self.assertEqual(tuple(connection.execute("SELECT topic_fingerprint, event_key FROM deliveries").fetchone()), original)
+
     def test_missing_database_parent_directory_is_created(self):
         nested_path = str(Path(self.path).parent / "nested" / "data" / "state.sqlite")
         database = Database(nested_path)

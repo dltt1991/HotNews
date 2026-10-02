@@ -233,6 +233,61 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.runs.history(other.id), [])
         self.assertEqual(self.runs.history(another_group.id), [])
 
+    def test_recreated_original_topic_keeps_delivery_identity_after_edit_and_cancel(self):
+        original = self.create(keywords=[" AI ", "Large    Models"])
+        run = self.claim()[0]
+        self.runs.complete(run.id, "worker", [self.result()], now=NOW)
+        self.confirm(run.id)
+        edited = self.subscriptions.update(original.id, original.version,
+                                           keywords=["energy"], now=NOW)
+        # A subscription keeps its own history even when its current topic changes.
+        self.assertEqual(len(self.runs.history(original.id)), 1)
+        self.subscriptions.cancel(original.id, edited.version, now=NOW)
+        recreated = self.create(keywords=["large models", "ai"])
+        self.assertEqual([item["event_key"] for item in self.runs.history(recreated.id)], ["model release"])
+        repeat = self.claim()[0]
+        self.runs.complete(repeat.id, "worker", [self.result(url="https://other.example/same-event")], now=NOW)
+        self.assertEqual(len(self.rows("outbox")), 1)
+        self.assertEqual(self.rows("subscription_runs")[-1]["status"], "completed")
+
+    def test_new_edited_topic_does_not_inherit_pre_edit_deliveries_of_another_subscription(self):
+        original = self.create(keywords=["AI"])
+        run = self.claim()[0]
+        self.runs.complete(run.id, "worker", [self.result()], now=NOW)
+        self.confirm(run.id)
+        edited = self.subscriptions.update(original.id, original.version,
+                                           keywords=["energy"], now=NOW)
+        self.subscriptions.cancel(original.id, edited.version, now=NOW)
+        new_topic = self.create(keywords=[" ENERGY "])
+        self.assertEqual(self.runs.history(new_topic.id), [])
+
+    def test_global_url_reuse_keeps_each_deliveries_actual_event_key(self):
+        first = self.create(keywords=["AI"])
+        first_run = self.claim()[0]
+        self.runs.complete(first_run.id, "worker", [self.result(event_key="first event")], now=NOW)
+        self.confirm(first_run.id)
+        second = self.create(keywords=["energy"])
+        second_run = next(run for run in self.claim() if run.subscription_id == second.id)
+        self.runs.complete(second_run.id, "worker", [self.result(event_key=" ENERGY   LAUNCH ")], now=NOW)
+        self.confirm(second_run.id)
+        self.assertEqual(len(self.rows("articles")), 1)
+        self.assertEqual([item["event_key"] for item in self.runs.history(first.id)], ["first event"])
+        self.assertEqual([item["event_key"] for item in self.runs.history(second.id)], ["energy launch"])
+        repeat = next(run for run in self.claim() if run.subscription_id == second.id)
+        self.runs.complete(repeat.id, "worker",
+                           [self.result(url="https://another.example/event", event_key="energy launch")], now=NOW)
+        self.assertEqual(len(self.rows("outbox")), 2)
+        self.assertEqual(len(self.rows("deliveries")), 2)
+        # A different event with the first subscription's label is still new to
+        # the second subscription; global article reuse must not suppress it.
+        current = self.subscriptions.get(second.id)
+        manual_id = self.subscriptions.request_manual_run(second.id, current.version, now=NOW)
+        next_run = next(run for run in self.claim() if run.subscription_id == second.id)
+        self.assertEqual(next_run.id, manual_id)
+        self.runs.complete(next_run.id, "worker",
+                           [self.result(url="https://another.example/different", event_key="first event")], now=NOW)
+        self.assertEqual(len(self.rows("outbox")), 3)
+
     def test_invalid_dates_count_window_references_reject_without_mutation(self):
         self.create()
         run = self.claim()[0]

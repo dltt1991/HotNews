@@ -16,6 +16,7 @@ from hotnews.domain import LeaseConflict, NewsResult, SubscriptionRun, Validatio
 from hotnews.feishu.cards import render_command_result, render_digest
 from hotnews.storage.database import Database
 from hotnews.storage.events import _claim_times, _datetime, _utc_text
+from hotnews.storage.identity import normalized_key as _key, topic_fingerprint
 from hotnews.storage.outbox import OutboxRepository
 from hotnews.storage.subscriptions import _subscription, next_run
 
@@ -43,10 +44,6 @@ def canonicalize_url(value: str) -> str:
         return urlunsplit((scheme, host, parsed.path or "/", urlencode(query), ""))
     except (ValueError, TypeError, UnicodeError):
         raise ValidationError("invalid news URL") from None
-
-
-def _key(value):
-    return " ".join(value.split()).casefold()
 
 
 def _run(row) -> SubscriptionRun:
@@ -134,23 +131,19 @@ class RunRepository:
             raise VersionConflict("subscription changed during research")
         return row, sub
 
-    @staticmethod
-    def _topic_ids(connection, subscription_id):
+    def _history(self, connection, subscription_id, include_pending=False):
         current = connection.execute("SELECT * FROM subscriptions WHERE id = ?", (subscription_id,)).fetchone()
         if current is None:
             raise ValidationError("unknown subscription")
-        identity = {_key(word) for word in json.loads(current["keywords_json"])}
-        return [row["id"] for row in connection.execute("SELECT id, keywords_json FROM subscriptions WHERE chat_id = ?",
-                                                       (current["chat_id"],))
-                if {_key(word) for word in json.loads(row["keywords_json"])} == identity]
-
-    def _history(self, connection, subscription_id, include_pending=False):
-        ids = self._topic_ids(connection, subscription_id)
+        identity = topic_fingerprint(json.loads(current["keywords_json"]))
         statuses = "('sent', 'pending')" if include_pending else "('sent')"
         return [dict(row) for row in connection.execute(
-            "SELECT DISTINCT a.url_hash, a.event_key, a.url, a.title, a.source, a.published_at "
-            "FROM deliveries d JOIN articles a ON a.id = d.article_id WHERE d.subscription_id IN (" +
-            ",".join("?" for _ in ids) + ") AND d.status IN " + statuses + " ORDER BY a.published_at DESC, a.url_hash", ids)]
+            "SELECT DISTINCT a.url_hash, d.event_key, a.url, a.title, a.source, a.published_at "
+            "FROM deliveries d JOIN articles a ON a.id = d.article_id "
+            "JOIN subscriptions s ON s.id = d.subscription_id "
+            "WHERE (d.subscription_id = ? OR (s.chat_id = ? AND d.topic_fingerprint = ?)) "
+            "AND d.status IN " + statuses + " ORDER BY a.published_at DESC, a.url_hash, d.event_key",
+            (subscription_id, current["chat_id"], identity))]
 
     def history(self, subscription_id: str):
         """Only confirmed deliveries enter the model's pushed-news history."""
@@ -215,13 +208,15 @@ class RunRepository:
                 outbox_id = OutboxRepository(self.database).enqueue(sub["chat_id"], "card", card,
                                                                   "digest:" + run_id, connection=connection)
                 connection.execute("UPDATE outbox SET run_id = ? WHERE id = ?", (run_id, outbox_id))
-                for _, article_id in selected:
+                identity = topic_fingerprint(json.loads(sub["keywords_json"]))
+                for item, article_id in selected:
                     connection.execute(
-                        "INSERT INTO deliveries (id, subscription_id, article_id, run_id, outbox_id) "
-                        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(subscription_id, article_id) DO UPDATE SET "
+                        "INSERT INTO deliveries (id, subscription_id, article_id, run_id, outbox_id, topic_fingerprint, event_key) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(subscription_id, article_id) DO UPDATE SET "
                         "run_id = excluded.run_id, outbox_id = excluded.outbox_id, status = 'pending', "
+                        "topic_fingerprint = excluded.topic_fingerprint, event_key = excluded.event_key, "
                         "attempts = 0, sent_at = NULL, feishu_message_id = NULL, last_error = NULL",
-                        (str(uuid4()), sub["id"], article_id, run_id, outbox_id),
+                        (str(uuid4()), sub["id"], article_id, run_id, outbox_id, identity, item.event_key),
                     )
                 status, finished = "awaiting_delivery", None
             else:

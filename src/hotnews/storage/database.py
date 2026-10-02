@@ -1,10 +1,13 @@
 """Configured SQLite connections and atomic, forward-only schema migrations."""
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+
+from hotnews.storage.identity import normalized_key, topic_fingerprint
 
 
 SCHEMA_VERSION = 2
@@ -143,6 +146,9 @@ _VERSION_2 = (
     "ALTER TABLE subscription_runs ADD COLUMN subscription_version INTEGER NOT NULL DEFAULT 1",
     "UPDATE subscription_runs SET subscription_version = "
     "(SELECT version FROM subscriptions WHERE id = subscription_runs.subscription_id)",
+    "ALTER TABLE deliveries ADD COLUMN topic_fingerprint TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE deliveries ADD COLUMN event_key TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX deliveries_topic_history ON deliveries(topic_fingerprint, status)",
 )
 _MIGRATIONS = ((1, _VERSION_1), (2, _VERSION_2))
 
@@ -189,6 +195,19 @@ class Database:
                 # executescript implicitly commits; individual execute calls preserve atomic DDL.
                 for statement in statements:
                     connection.execute(statement)
+                if version == 2:
+                    # Version 1 stored identities only on mutable subscriptions
+                    # and global articles. Preserve the available legacy identity
+                    # once; all new deliveries explicitly snapshot their own facts.
+                    rows = connection.execute(
+                        "SELECT d.id, s.keywords_json, a.event_key FROM deliveries d "
+                        "JOIN subscriptions s ON s.id = d.subscription_id "
+                        "JOIN articles a ON a.id = d.article_id",
+                    ).fetchall()
+                    for row in rows:
+                        connection.execute("UPDATE deliveries SET topic_fingerprint = ?, event_key = ? WHERE id = ?",
+                                           (topic_fingerprint(json.loads(row["keywords_json"])),
+                                            normalized_key(row["event_key"]), row["id"]))
                 applied_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                 connection.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                                    (version, applied_at))
