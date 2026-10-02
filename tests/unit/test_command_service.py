@@ -10,7 +10,6 @@ import unittest
 from unittest.mock import patch
 
 from hotnews.domain import Intent, LeaseConflict, Schedule, ValidationError, VersionConflict
-from hotnews.commands import handle_command
 from hotnews.commands.schema import parse_intent
 from hotnews.commands.service import CommandService
 from hotnews.storage.database import Database
@@ -368,12 +367,6 @@ class CommandServiceTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.service.apply(event_id, "worker", Intent("show_help", subscription_number=1))
         self.assertEqual(self.rows("outbox"), [])
-
-    def test_legacy_command_import_keeps_existing_callback_compatible(self):
-        from hotnews.store import DeliveryStore
-        message = handle_command(DeliveryStore(self.database.path), "feishu", "legacy-chat", "帮助", {}, [])
-        self.assertIn("订阅", message)
-
 
     def test_repository_caller_connection_rolls_back_all_nested_work(self):
         event_id = self.event()

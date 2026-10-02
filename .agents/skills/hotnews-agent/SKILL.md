@@ -88,4 +88,6 @@ description: 处理本项目飞书群热点订阅的待办指令、搜索词更�
 
 ## Dry-run
 
-用户明确要求 dry-run 时，跳过整个写入流程；仅用 `list-due` 和每条订阅的 `history` 获取上下文，完成相同搜索、去重、筛选与中文摘要。输出人类可读卡片内容预览（含订阅编号、关键词、窗口、来源、日期及历史补充），另附上方 news 契约的结果 JSON 数组，不向结果对象添加预览元数据。不领取工作、不更新搜索词、不写库、不发送、不调用 acquire/renew/release 或任何 claim/complete/fail 动作。尚未有搜索词的订阅不在当前只读列表中，不隐式创建或更新它。Task12 的 top-level `dry-run` 将提供最终结构化卡片渲染入口；本节只读内容预览不代替该入口。
+用户明确要求 dry-run 时，跳过整个写入流程；仅用 `list-due` 和每条订阅的 `history` 获取上下文，完成相同搜索、去重、筛选与中文摘要。使用真实卡片渲染入口 `PYTHONPATH=src python3 -m hotnews.cli dry-run`，以 stdin 传入严格 JSON：`{"subscription":{"display_number":2,"topic":"人工智能","keywords":["人工智能"]},"search_window_days":30,"results":[]}`。用只读返回的订阅编号、主题和原始关键词替换示例上下文；results 使用上方 news 契约、最多 10 条，窗口为实际 1/7/30 天。不向结果对象增加预览元数据。输出含 `card`、`result_count`、`search_window_days`；有结果时 card 是与真实推送相同的结构化飞书卡片（含来源、日期及历史补充），无结果时 card=null。可向用户展示其可读内容并保留 JSON 预览。
+
+不领取工作、不更新搜索词、不写库、不发送、不调用 acquire/renew/release 或任何 claim/complete/fail 动作。该渲染入口不读取凭据、配置或数据库；它验证输入但不替代前面的网页研究与事实核对。尚未有搜索词的订阅不在当前只读列表中，不隐式创建或更新它。

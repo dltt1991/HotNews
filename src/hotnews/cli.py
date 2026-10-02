@@ -7,7 +7,8 @@ import sys
 from .commands.schema import nonempty_string, object_fields, parse_intent, parse_json, positive_integer
 from .commands.service import CommandService, json_default
 from .config import load_config
-from .domain import LeaseConflict, NewsResult, ValidationError, VersionConflict
+from .domain import LeaseConflict, NewsResult, Schedule, Subscription, ValidationError, VersionConflict
+from .feishu.cards import render_digest
 from .storage.database import Database
 from .storage.events import EventRepository, LeaseRepository, _datetime, _utc_text
 from .storage.runs import RunRepository
@@ -28,11 +29,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--config", default="config.json", help="JSON config file")
     result.add_argument("--verbose", action="store_true")
     commands = result.add_subparsers(dest="command", required=True)
-    once = commands.add_parser("once", help="collect and deliver once")
-    once.add_argument("--subscription", action="append", default=[])
-    once.add_argument("--dry-run", action="store_true", help="print without sending or recording")
-    commands.add_parser("serve", help="run scheduler forever")
-    commands.add_parser("webhook", help="run callback HTTP server only")
+    commands.add_parser("serve", help="run Feishu callback, localhost admin and outbox worker")
     agent = commands.add_parser("agent", help="restricted JSON interface for Codex")
     actions = agent.add_subparsers(dest="agent_command", required=True)
     actions.add_parser("claim-events", help="claim a bounded batch of queued group messages")
@@ -52,6 +49,7 @@ def parser() -> argparse.ArgumentParser:
         ("fail-run", "fail owned research work and update its failure counter"),
     ):
         actions.add_parser(action, help=help_text)
+    commands.add_parser("dry-run", help="render validated news JSON as a card without state changes or sends")
     return result
 
 
@@ -93,6 +91,29 @@ def parse_news_results(value):
             references=tuple(nonempty_string(reference, "reference") for reference in references),
         ))
     return results
+
+
+def run_dry_run(value):
+    """Render a supplied research preview without opening any application state."""
+    object_fields(value, ("subscription", "results", "search_window_days"))
+    context = value["subscription"]
+    object_fields(context, ("display_number", "topic", "keywords"))
+    number = positive_integer(context["display_number"], "display_number")
+    intent = parse_intent({"action": "create_subscription", "topic": context["topic"],
+                           "keywords": context["keywords"]})
+    now = datetime.now(timezone.utc)
+    window = value["search_window_days"]
+    results = RunRepository._results(parse_news_results(value["results"]), now, window)
+    selected, urls, events = [], set(), set()
+    for item in results:
+        if item.url not in urls and item.event_key not in events:
+            selected.append(item)
+            urls.add(item.url)
+            events.add(item.event_key)
+    subscription = Subscription("preview", "preview", number, "preview", intent.topic, intent.keywords,
+                                (), Schedule("manual"), "ready", None, 1, now, now)
+    return {"card": render_digest(subscription, selected, window, now=now) if selected else None,
+            "result_count": len(selected), "search_window_days": window}
 
 
 def run_agent(action, config, value):
@@ -196,10 +217,13 @@ def run_agent(action, config, value):
 
 def main() -> int:
     args = parser().parse_args()
-    if args.command == "agent":
+    if args.command in ("agent", "dry-run"):
         try:
-            config = load_config(args.config)
-            result = run_agent(args.agent_command, config, read_input())
+            if args.command == "dry-run":
+                result = run_dry_run(read_input())
+            else:
+                config = load_config(args.config)
+                result = run_agent(args.agent_command, config, read_input())
             write_output(result)
             return 0
         except (ValidationError, LeaseConflict, VersionConflict, OverflowError):
@@ -214,17 +238,24 @@ def main() -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    config = load_config(args.config)
-    if args.command == "once":
-        from .agent import HotNewsAgent
-        HotNewsAgent(config).run_once(args.subscription, args.dry_run)
-    elif args.command == "serve":
-        from .scheduler import serve
-        serve(config)
-    else:
-        from .server import serve_callbacks
-        serve_callbacks(config)
-    return 0
+    import signal
+    import threading
+    from .runtime import run_service
+    stop_event = threading.Event()
+    original_handlers = {}
+    try:
+        config = load_config(args.config)
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            original_handlers[signum] = signal.signal(signum, lambda *_: stop_event.set())
+        run_service(config, stop_event)
+        return 0
+    except Exception:
+        sys.stderr.write("Runtime startup or service failed; check configuration and service logs.\n")
+        return 1
+    finally:
+        stop_event.set()
+        for signum, handler in original_handlers.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

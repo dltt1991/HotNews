@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ..config import AppConfig
 from ..domain import ValidationError
+from ..http import supervise_request_errors
 from ..storage.database import Database
 from ..storage.subscriptions import SubscriptionRepository
 from .app import AdminApplication
@@ -68,6 +69,9 @@ def serve_admin(config: AppConfig, stop_event: threading.Event) -> None:
     database.migrate()
     app = AdminApplication(config, SubscriptionRepository(database))
     with ThreadingHTTPServer(("127.0.0.1", config.admin.port), make_handler(app)) as server:
+        failed = supervise_request_errors(server, stop_event)
         server.timeout = 0.5
         while not stop_event.is_set():
             server.handle_request()
+        if failed.is_set():
+            raise RuntimeError("admin request handler failed")

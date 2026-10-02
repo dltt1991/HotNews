@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hotnews-agent"
 version = "0.1.0"
-description = "Hot news subscription agent for Feishu and WeCom groups"
+description = "Personal Feishu group news subscriptions with Codex research and a localhost manager"
 requires-python = ">=3.8"
 dependencies = ["cryptography>=2.8"]
 

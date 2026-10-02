@@ -7,5 +7,6 @@ RUN pip install --no-cache-dir .
 COPY config.example.json ./config.example.json
 RUN mkdir -p /app/data
 
-CMD ["hotnews", "--config", "/app/config.json", "serve"]
+EXPOSE 8080
 
+CMD ["hotnews", "--config", "/app/config.json", "serve"]

@@ -11,6 +11,7 @@ from typing import Mapping, Optional
 
 from ..config import AppConfig, FeishuConfig, load_feishu_config
 from ..domain import HttpResponse, ValidationError
+from ..http import supervise_request_errors
 from ..storage.database import Database
 from ..storage.events import EventRepository
 from ..storage.outbox import OutboxRepository
@@ -149,6 +150,9 @@ def serve_gateway(config: AppConfig, stop_event: threading.Event,
     database.migrate()
     app = GatewayApplication(config, feishu_config, database)
     with ThreadingHTTPServer((config.callback.host, config.callback.port), make_handler(app)) as server:
+        failed = supervise_request_errors(server, stop_event)
         server.timeout = 0.5
         while not stop_event.is_set():
             server.handle_request()
+        if failed.is_set():
+            raise RuntimeError("callback request handler failed")

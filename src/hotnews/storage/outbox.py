@@ -72,9 +72,11 @@ class OutboxRepository:
             return claimed
 
     def sent(self, item_id: str, owner: str, feishu_message_id: str, now: datetime) -> None:
-        """Record confirmed delivery; linked run/delivery finalization is a later task."""
+        """Atomically record a confirmed send and all linked business state."""
         sent_at = _utc_text(now)
         with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._owned(connection, item_id, owner)
             cursor = connection.execute(
                 "UPDATE outbox SET status = 'sent', feishu_message_id = ?, sent_at = ?, "
                 "lease_owner = NULL, lease_until = NULL, next_attempt_at = NULL, last_error = NULL "
@@ -83,11 +85,46 @@ class OutboxRepository:
             )
             if cursor.rowcount != 1:
                 raise LeaseConflict("outbox item is not leased by this owner")
+            connection.execute(
+                "UPDATE deliveries SET status = 'sent', feishu_message_id = ?, sent_at = ?, "
+                "attempts = ?, last_error = NULL WHERE outbox_id = ? AND status = 'pending'",
+                (feishu_message_id, sent_at, row["attempts"], item_id),
+            )
+            if row["run_id"] is not None:
+                from .runs import RunRepository
+                RunRepository(self.database).finish_delivery(connection, row["run_id"], now)
+
+    @staticmethod
+    def _owned(connection, item_id, owner):
+        row = connection.execute("SELECT * FROM outbox WHERE id = ?", (item_id,)).fetchone()
+        if row is None or row["status"] != "leased" or row["lease_owner"] != owner:
+            raise LeaseConflict("outbox item is not leased by this owner")
+        return row
+
+    def fail(self, item_id: str, owner: str, error: str, now: datetime) -> None:
+        """Fail one message/run once, freeing pending article suppression."""
+        timestamp = _utc_text(now)
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._owned(connection, item_id, owner)
+            connection.execute(
+                "UPDATE outbox SET status = 'failed', last_error = ?, lease_owner = NULL, "
+                "lease_until = NULL, next_attempt_at = NULL WHERE id = ?", (error, item_id),
+            )
+            connection.execute(
+                "UPDATE deliveries SET status = 'failed', attempts = ?, last_error = ? "
+                "WHERE outbox_id = ? AND status = 'pending'", (row["attempts"], error, item_id),
+            )
+            if row["run_id"] is not None:
+                from .runs import RunRepository
+                RunRepository(self.database).finish_delivery(connection, row["run_id"], now, error=error)
 
     def retry(self, item_id: str, owner: str, error: str, next_attempt_at: datetime) -> None:
         """Schedule another send; its next claim increments attempts exactly once."""
         due = _utc_text(next_attempt_at)
         with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._owned(connection, item_id, owner)
             cursor = connection.execute(
                 "UPDATE outbox SET status = 'pending', next_attempt_at = ?, last_error = ?, "
                 "lease_owner = NULL, lease_until = NULL "
@@ -96,3 +133,5 @@ class OutboxRepository:
             )
             if cursor.rowcount != 1:
                 raise LeaseConflict("outbox item is not leased by this owner")
+            connection.execute("UPDATE deliveries SET attempts = ?, last_error = ? "
+                               "WHERE outbox_id = ? AND status = 'pending'", (row["attempts"], error, item_id))

@@ -1,47 +1,82 @@
+"""One full callback → commands → research → confirmed send acceptance flow."""
+
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
 import tempfile
 import unittest
-from datetime import datetime
-from unittest.mock import patch
 
-from hotnews.agent import HotNewsAgent, _matches
-from hotnews.channels import render_markdown
-from hotnews.models import NewsItem
-from hotnews.scheduler import _due
+from hotnews.commands.schema import parse_intent
+from hotnews.commands.service import CommandService
+from hotnews.config import AppConfig
+from hotnews.domain import NewsResult
+from hotnews.feishu.client import FeishuClient
+from hotnews.feishu.gateway import GatewayApplication
+from hotnews.runtime import OutboxWorker
+from hotnews.storage.database import Database
+from hotnews.storage.events import EventRepository
+from hotnews.storage.runs import RunRepository
+from hotnews.storage.subscriptions import SubscriptionRepository
+from tests.integration.test_runtime import Transport
+from tests.unit.test_feishu import config, message_event
 
 
-class HotNewsTests(unittest.TestCase):
-    def test_matches_keywords_and_excludes(self):
-        item = NewsItem("test", "A new LLM agent", "https://example.com", score=12)
-        self.assertTrue(_matches(item, {"keywords": ["llm"], "min_score": 10}))
-        self.assertFalse(_matches(item, {"keywords": ["llm"], "exclude_keywords": ["agent"]}))
-
-    def test_markdown(self):
-        text = render_markdown("日报", [NewsItem("source", "title", "https://example.com")])
-        self.assertIn("[title](https://example.com)", text)
-
-    def test_daily_schedule_once_per_minute(self):
-        now = datetime(2025, 1, 1, 9, 0)
-        self.assertTrue(_due({"type": "daily", "at": "09:00"}, now, {}, "daily"))
-        self.assertFalse(_due({"type": "daily", "at": "09:00"}, now,
-                              {"daily": "2025-01-01 09:00"}, "daily"))
-
-    @patch("hotnews.agent.send")
-    @patch("hotnews.agent.HotNewsAgent.gather")
-    def test_delivery_is_deduplicated(self, gather, sender):
-        item = NewsItem("source", "AI news", "https://example.com/1")
-        gather.return_value = {"source": [item]}
+class HotNewsAcceptanceTests(unittest.TestCase):
+    def test_group_pipeline_multi_subscription_shared_manual_run_dedupe_and_soft_cancel(self):
         with tempfile.TemporaryDirectory() as directory:
-            config = {
-                "database": directory + "/db.sqlite",
-                "sources": [{"name": "source", "type": "rss", "url": "unused"}],
-                "subscriptions": [{"name": "sub", "keywords": ["AI"],
-                                   "channels": [{"name": "group", "type": "wecom", "webhook": "x"}]}],
-            }
-            agent = HotNewsAgent(config)
-            self.assertEqual(agent.run_once(), 1)
-            self.assertEqual(agent.run_once(), 0)
-            self.assertEqual(sender.call_count, 1)
+            app_config = AppConfig(database_path=str(Path(directory) / "pipeline.db"))
+            database = Database(app_config.database_path)
+            database.migrate()
+            gateway = GatewayApplication(app_config, config(), database)
+            events = EventRepository(database)
+            subscriptions = SubscriptionRepository(database)
+            runs = RunRepository(database)
+            now = datetime.now(timezone.utc)
+            commands = CommandService(database, clock=lambda: now)
 
+            def command(number, intent, sender="ou_member"):
+                payload = message_event()
+                payload["header"]["event_id"] = "evt_%d" % number
+                payload["event"]["message"]["message_id"] = "om_%d" % number
+                payload["event"]["sender"]["sender_id"]["open_id"] = sender
+                body = json.dumps(payload).encode()
+                headers = {"Content-Type": "application/json"}
+                self.assertEqual(gateway.handle("POST", "/callbacks/feishu", headers, body).status, 200)
+                self.assertEqual(gateway.handle("POST", "/callbacks/feishu", headers, body).status, 200)
+                claimed = events.claim_pending("research", 20, now, 900)
+                self.assertEqual(len(claimed), 1)
+                return commands.apply(claimed[0].event_id, "research", parse_intent(intent))
 
-if __name__ == "__main__":
-    unittest.main()
+            first = command(1, {"action": "create_subscription", "topic": "AI", "keywords": ["AI"],
+                                "search_terms": ["AI", "artificial intelligence"]}).subscription
+            second = command(2, {"action": "create_subscription", "topic": "能源", "keywords": ["能源"],
+                                 "search_terms": ["能源", "energy"],
+                                 "schedule": {"kind": "interval", "interval_minutes": 120}}).subscription
+            self.assertEqual((first.display_number, second.display_number), (1, 2))
+            command(3, {"action": "run_subscription_now", "subscription_number": 1}, sender="ou_other_member")
+            batch = runs.claim_due("research", 3, now, 900)
+            run = next(item for item in batch if item.subscription_id == first.id)
+            self.assertEqual(run.trigger, "manual")
+            news = NewsResult("官方新模型", "https://official.example/model", "官方",
+                              now - timedelta(hours=25), "机构公布了新模型。支持复杂任务。", "official:model:v1")
+            runs.complete(run.id, "research", [news], now=now, search_window_days=7)
+            self.assertEqual(runs.history(first.id), [])
+            transport = Transport()
+            worker = OutboxWorker(app_config, FeishuClient(config(), transport), clock=lambda: 0)
+            worker.run_once(now)
+            self.assertEqual(len(transport.messages), 7)
+            self.assertEqual(runs.history(first.id)[0]["event_key"], "official:model:v1")
+            card = json.loads(transport.messages[-1]["content"])
+            self.assertIn("历史补充", card["elements"][0]["text"]["content"])
+            self.assertEqual(worker.run_once(now), 0)
+            command(4, {"action": "cancel_subscription", "subscription_number": 1})
+            self.assertEqual(subscriptions.get(first.id).state, "cancelled")
+            self.assertEqual(subscriptions.get(second.id).state, "ready")
+            recreated = command(5, {"action": "create_subscription", "topic": "AI", "keywords": ["AI"],
+                                    "search_terms": ["AI", "artificial intelligence"]}).subscription
+            self.assertEqual(recreated.display_number, 3)
+            self.assertEqual(runs.history(recreated.id)[0]["event_key"], "official:model:v1")
+            database = Database(app_config.database_path)
+            database.migrate()
+            self.assertEqual(len(SubscriptionRepository(database).list("oc_group")), 2)
+            self.assertEqual(RunRepository(database).history(recreated.id)[0]["event_key"], "official:model:v1")

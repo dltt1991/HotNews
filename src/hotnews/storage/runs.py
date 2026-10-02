@@ -250,17 +250,45 @@ class RunRepository:
             )
             if sub["version"] != row["subscription_version"]:
                 return _run(connection.execute("SELECT * FROM subscription_runs WHERE id = ?", (run_id,)).fetchone())
-            count = sub["consecutive_failures"] + 1
-            alert = count >= 3 and not sub["alerted"]
-            connection.execute(
-                "UPDATE subscriptions SET consecutive_failures = ?, alerted = ?, last_alert_at = ?, "
-                "updated_at = ?, version = version + 1 WHERE id = ?",
-                (count, int(bool(sub["alerted"]) or alert), timestamp if alert else sub["last_alert_at"],
-                 timestamp, sub["id"]),
-            )
-            if alert:
-                card = render_command_result("订阅 #%d（%s）连续运行失败，请检查服务状态。" %
-                                             (sub["display_number"], sub["topic"]))
-                OutboxRepository(self.database).enqueue(sub["chat_id"], "card", card, "alert:" + run_id,
-                                                       connection=connection)
+            self._record_failure(connection, sub, run_id, timestamp)
             return _run(connection.execute("SELECT * FROM subscription_runs WHERE id = ?", (run_id,)).fetchone())
+
+    def _record_failure(self, connection, sub, run_id, timestamp):
+        count = sub["consecutive_failures"] + 1
+        alert = count >= 3 and not sub["alerted"]
+        connection.execute(
+            "UPDATE subscriptions SET consecutive_failures = ?, alerted = ?, last_alert_at = ?, "
+            "updated_at = ?, version = version + 1 WHERE id = ?",
+            (count, int(bool(sub["alerted"]) or alert), timestamp if alert else sub["last_alert_at"],
+             timestamp, sub["id"]),
+        )
+        if alert:
+            card = render_command_result("订阅 #%d（%s）连续运行失败，请检查服务状态。" %
+                                         (sub["display_number"], sub["topic"]))
+            OutboxRepository(self.database).enqueue(sub["chat_id"], "card", card, "alert:" + run_id,
+                                                   connection=connection)
+
+    def finish_delivery(self, connection, run_id: str, now: datetime, error=None) -> None:
+        """Finalize under the outbox's transaction, preserving newer edits."""
+        timestamp = _utc_text(now)
+        row = connection.execute("SELECT * FROM subscription_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None or row["status"] != "awaiting_delivery":
+            raise LeaseConflict("run is not awaiting delivery")
+        sub = connection.execute("SELECT * FROM subscriptions WHERE id = ?", (row["subscription_id"],)).fetchone()
+        connection.execute(
+            "UPDATE subscription_runs SET status = ?, completed_at = ?, lease_until = NULL, "
+            "last_error = ? WHERE id = ?", ("failed" if error else "completed", timestamp, error, run_id),
+        )
+        # Delivery history is factual even if the user changed/cancelled the
+        # subscription after preparation. Its newer version remains untouched.
+        if sub["version"] != row["subscription_version"]:
+            return
+        if error:
+            self._record_failure(connection, sub, run_id, timestamp)
+        else:
+            due = next_run(_subscription(sub).schedule, now) if row["trigger"] == "scheduled" else _datetime(sub["next_run_at"])
+            connection.execute(
+                "UPDATE subscriptions SET last_success_at = ?, consecutive_failures = 0, alerted = 0, "
+                "last_alert_at = NULL, next_run_at = ?, updated_at = ?, version = version + 1 WHERE id = ?",
+                (timestamp, _utc_text(due) if due is not None else None, timestamp, sub["id"]),
+            )
