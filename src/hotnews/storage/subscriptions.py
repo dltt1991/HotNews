@@ -126,6 +126,11 @@ class SubscriptionRepository:
         row = connection.execute("SELECT * FROM subscriptions WHERE id = ?", (id,)).fetchone()
         return _subscription(row) if row is not None else None
 
+    def chat_names(self):
+        """Return cached group display names without exposing SQL to consumers."""
+        with self.database.connect() as connection:
+            return {row["chat_id"]: row["name"] for row in connection.execute("SELECT chat_id, name FROM chats")}
+
     def get_by_number(self, chat_id: str, number: int,
                       connection: Optional[sqlite3.Connection] = None) -> Optional[Subscription]:
         """Resolve only within the event's group; numbers are never global IDs."""
