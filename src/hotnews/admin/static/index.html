@@ -14,6 +14,10 @@
     <p>查看与调整飞书群订阅。新增订阅请在群内 @机器人。所有时间均为北京时间。</p>
   </header>
   <main>
+    <section class="connection-panel" aria-label="飞书长连接状态">
+      <p id="connection-status" role="status" aria-live="polite">正在读取飞书连接状态…</p>
+      <p id="connection-error" class="connection-error"></p>
+    </section>
     <section aria-label="订阅筛选" class="panel">
       <form id="filters" class="filters">
         <div><label for="filter-chat">飞书群</label><select id="filter-chat"><option value="">全部群</option></select></div>

@@ -14,6 +14,7 @@ from hotnews.admin.app import AdminApplication
 from hotnews.admin import server as admin_server
 from hotnews.config import AppConfig, ServerConfig
 from hotnews.domain import NewsResult, Schedule, ValidationError
+from hotnews.feishu.connection import ConnectionSnapshot
 from hotnews.storage.database import Database
 from hotnews.storage.runs import RunRepository
 from hotnews.storage.subscriptions import SubscriptionRepository
@@ -110,6 +111,27 @@ class AdminTests(unittest.TestCase):
                          ("ready", "ready", 0))
         self.assertIsNone(item["last_success_at"])
         self.assertEqual(values[1]["chat_name"], "chat-b")
+
+    def test_connection_status_is_get_only_local_and_sanitized(self):
+        snapshot = ConnectionSnapshot(
+            "reconnecting", datetime(2026, 10, 2, 1, 0, tzinfo=timezone.utc),
+            datetime(2026, 10, 2, 1, 2, tzinfo=timezone.utc), 3,
+            "failed wss://open.feishu.cn/ws?ticket=secret via http://u:p@proxy:7890")
+        app = AdminApplication(self.config, self.repository, csrf_token=TOKEN,
+                               clock=lambda: NOW, status_provider=lambda: snapshot)
+        response = self.request("GET", "/api/connection", app=app)
+        self.assertEqual(response.status, 200)
+        value = json.loads(response.body)["connection"]
+        self.assertEqual(value, {
+            "state": "reconnecting",
+            "connected_at": "2026-10-02T01:00:00.000000Z",
+            "last_event_at": "2026-10-02T01:02:00.000000Z",
+            "reconnect_attempts": 3,
+            "last_error": "failed wss://open.feishu.cn/ws?<redacted> via http://***:***@proxy:7890",
+        })
+        self.assertNotIn("secret", response.body.decode())
+        self.assertEqual(self.request("POST", "/api/connection", {}, app=app).status, 405)
+        self.assertEqual(self.request("GET", "/api/connection", headers={"Host": "evil:8081"}, app=app).status, 403)
 
     def test_filters_combine_group_state_and_keyword_case_insensitively(self):
         keep = self.create(topic="AI Agents", keywords=["大模型"])

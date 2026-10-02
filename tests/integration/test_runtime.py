@@ -644,7 +644,8 @@ class ServiceTests(unittest.TestCase):
             with patch("hotnews.runtime.load_feishu_config", return_value=client.config), \
                  patch("hotnews.runtime.FeishuClient", return_value=client), \
                  patch("hotnews.runtime.FeishuLongConnection", Connection), \
-                 patch("hotnews.runtime.serve_admin", side_effect=lambda c, s: boundary("admin", s)):
+                 patch("hotnews.runtime.serve_admin", side_effect=lambda c, s, provider: (
+                     self.assertEqual(provider().state, "starting"), boundary("admin", s))[-1]):
                 run_service(config, stop)
             self.assertTrue(ready.is_set())
             self.assertEqual(sorted(started), ["admin", "connection"])
@@ -658,7 +659,7 @@ class ServiceTests(unittest.TestCase):
             stop = threading.Event()
             finished = threading.Event()
 
-            def peer(c, s):
+            def peer(c, s, provider):
                 s.wait(2)
                 finished.set()
 

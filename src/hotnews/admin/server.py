@@ -63,13 +63,13 @@ def make_handler(app: AdminApplication):
     return Handler
 
 
-def serve_admin(config: AppConfig, stop_event: threading.Event) -> None:
+def serve_admin(config: AppConfig, stop_event: threading.Event, status_provider=None) -> None:
     """Run on IPv4 loopback until the owning runtime signals shutdown."""
     if config.admin.host != "127.0.0.1":
         raise ValidationError("admin must bind to 127.0.0.1")
     database = Database(config.database_path)
     database.migrate()
-    app = AdminApplication(config, SubscriptionRepository(database))
+    app = AdminApplication(config, SubscriptionRepository(database), status_provider=status_provider)
     with ThreadingHTTPServer(("127.0.0.1", config.admin.port), make_handler(app)) as server:
         failed = supervise_request_errors(server, stop_event)
         server.timeout = 0.5

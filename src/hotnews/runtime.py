@@ -149,7 +149,7 @@ def run_service(config: AppConfig, stop_event: threading.Event) -> None:
         threading.Thread(name="hotnews-connection", target=supervise,
                          args=("connection", connection.run, stop_event)),
         threading.Thread(name="hotnews-admin", target=supervise,
-                         args=("admin", serve_admin, config, stop_event)),
+                         args=("admin", serve_admin, config, stop_event, status.snapshot)),
         threading.Thread(name="hotnews-outbox", target=supervise,
                          args=("outbox", worker.run, stop_event)),
     ]

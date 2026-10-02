@@ -62,6 +62,8 @@ const context = vm.createContext({document, URLSearchParams, Intl, Date, console
       rows = rows.map(row => row.id === current.id ? current : row);
     }
     const value = url === '/api/session' ? {csrf_token: 'browser-token'} :
+      url === '/api/connection' ? {connection: {state: 'reconnecting', connected_at: '2026-10-02T01:00:00Z',
+        last_event_at: null, reconnect_attempts: 2, last_error: '<img src=x onerror=alert(1)>'}} :
       url.startsWith('/api/subscriptions?') || url === '/api/subscriptions' ?
         {subscriptions: rows.map(row => ({...row}))} : {subscription: {...current}, run_id: 'run-1'};
     return {ok: true, status: 200, json: async () => value};
@@ -170,6 +172,14 @@ function mutations() { return requests.filter(request => request.method && reque
       failure = 403; await fire(button('暂停')); assert.ok(byId.status.textContent.includes('刷新'));
       failure = 500; await fire(button('暂停')); assert.ok(byId.status.textContent.includes('服务'));
       await fire(button('暂停')); assert.equal(current.state, 'paused');
+      break;
+    }
+    case 'connection': {
+      assert.ok(byId['connection-status'].textContent.includes('正在重连'));
+      assert.ok(byId['connection-status'].textContent.includes('2'));
+      assert.ok(byId['connection-error'].textContent.includes('<img src=x onerror=alert(1)>'));
+      assert.ok(!walk(byId['connection-error']).some(element => element.tagName === 'IMG'));
+      assert.ok(requests.some(request => request.url === '/api/connection'));
       break;
     }
     case 'states': {

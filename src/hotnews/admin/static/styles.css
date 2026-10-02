@@ -29,6 +29,9 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .history input { width: 1.1rem; height: 1.1rem; }
 .status-bar { display: flex; gap: 1rem; align-items: center; padding: .8rem .2rem; min-height: 3.8rem; }
 .status-bar p { flex: 1; font-size: .9rem; }
+.connection-panel { margin-bottom: 1rem; padding: .75rem 1rem; border: 1px solid var(--line); border-radius: .5rem; }
+.connection-panel p { margin: 0; }
+.connection-error { color: var(--danger); font-size: .85rem; overflow-wrap: anywhere; }
 .subscriptions-panel { padding: 0; overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; text-align: left; font-size: .88rem; }
 caption { text-align: left; font-size: 1rem; font-weight: 700; padding: 1rem 1.1rem; border-bottom: 1px solid #d9e3db; }

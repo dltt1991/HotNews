@@ -13,6 +13,8 @@ from urllib.parse import parse_qsl, urlsplit
 from ..commands.schema import nonempty_string, object_fields, parse_json, parse_schedule, positive_integer
 from ..config import AppConfig
 from ..domain import HttpResponse, Subscription, ValidationError, VersionConflict
+from ..feishu.connection import ConnectionSnapshot
+from ..feishu.proxy import redact_sensitive
 from ..http import ContentLengthError, bounded_content_length
 from ..storage.database import Database
 from ..storage.events import _utc_text
@@ -63,7 +65,8 @@ class AdminApplication:
     """Expose existing subscriptions; subscription creation stays in Feishu."""
 
     def __init__(self, config: AppConfig, repository: Optional[SubscriptionRepository] = None,
-                 csrf_token: Optional[str] = None, clock: Optional[Callable[[], datetime]] = None):
+                 csrf_token: Optional[str] = None, clock: Optional[Callable[[], datetime]] = None,
+                 status_provider: Optional[Callable[[], ConnectionSnapshot]] = None):
         if config.admin.host != "127.0.0.1":
             raise ValidationError("admin must bind to 127.0.0.1")
         self.config = config
@@ -71,6 +74,19 @@ class AdminApplication:
         self.max_body_bytes = config.admin.max_body_bytes or _DEFAULT_MAX_BODY_BYTES
         self.csrf_token = secrets.token_urlsafe(32) if csrf_token is None else nonempty_string(csrf_token, "csrf token")
         self.clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
+        self.status_provider = status_provider or (lambda: ConnectionSnapshot(
+            "stopped", None, None, 0, None))
+
+    def _connection(self) -> HttpResponse:
+        snapshot = self.status_provider()
+        value = {
+            "state": snapshot.state,
+            "connected_at": _utc_text(snapshot.connected_at) if snapshot.connected_at else None,
+            "last_event_at": _utc_text(snapshot.last_event_at) if snapshot.last_event_at else None,
+            "reconnect_attempts": snapshot.reconnect_attempts,
+            "last_error": redact_sensitive(snapshot.last_error) if snapshot.last_error else None,
+        }
+        return _json_response(200, {"connection": value})
 
     def _authority(self, host: str) -> Optional[str]:
         match = re.fullmatch(r"(localhost|127\.0\.0\.1)(?::([0-9]{1,5}))?", host, re.IGNORECASE)
@@ -173,7 +189,7 @@ class AdminApplication:
                 raise ValidationError("invalid route")
             route = parsed.path
             subscription_id, action = None, None
-            if route in _STATIC or route in ("/api/session", "/api/subscriptions"):
+            if route in _STATIC or route in ("/api/session", "/api/subscriptions", "/api/connection"):
                 allowed = "GET"
             else:
                 match = re.fullmatch(r"/api/subscriptions/([^/]+)(?:/(pause|resume|run-now))?", route)
@@ -210,6 +226,10 @@ class AdminApplication:
                 if parsed.query:
                     raise ValidationError("session does not accept filters")
                 return _json_response(200, {"csrf_token": self.csrf_token})
+            if route == "/api/connection":
+                if parsed.query:
+                    raise ValidationError("connection route does not accept filters")
+                return self._connection()
             if route == "/api/subscriptions":
                 return self._list(parsed.query)
             if parsed.query:

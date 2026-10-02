@@ -159,6 +159,9 @@ class AdminPageTests(unittest.TestCase):
     def test_network_and_api_errors_are_visible_and_controls_recover(self):
         self.browser("errors")
 
+    def test_connection_state_is_rendered_as_text(self):
+        self.browser("connection")
+
     def test_pending_paused_and_cancelled_rows_offer_only_valid_actions(self):
         self.browser("states")
 

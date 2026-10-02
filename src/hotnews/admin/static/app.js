@@ -11,6 +11,14 @@
   let busy = false, stale = false, actionButtons = [];
 
   function message(text) { get('status').textContent = text; }
+  function renderConnection(connection) {
+    const names = {starting: '正在连接', connected: '已连接', reconnecting: '正在重连',
+      stopped: '已停止', fatal: '连接失败'};
+    let text = `飞书长连接：${names[connection.state] || connection.state}`;
+    if (connection.state === 'reconnecting') text += `（第 ${connection.reconnect_attempts} 次）`;
+    get('connection-status').textContent = text;
+    get('connection-error').textContent = connection.last_error || '';
+  }
   function element(tag, text, className) {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = text;
@@ -173,6 +181,7 @@
     closeEditor(false); setBusy(true); message('正在加载订阅…');
     try {
       if (bootstrap) csrf = (await api('/api/session')).csrf_token;
+      renderConnection((await api('/api/connection')).connection);
       await readList();
       stale = false; get('conflict-refresh').hidden = true;
       updateChats(); render(); message(`已加载 ${items.length} 条订阅。`);
