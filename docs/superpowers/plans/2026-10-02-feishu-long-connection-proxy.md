@@ -56,7 +56,7 @@ Cover all four accepted schemes, missing hosts, invalid ports, fragments, URL qu
 
 - [ ] **Step 3: Run the focused tests and verify failure**
 
-Run: `python3 -m unittest tests.unit.test_config_domain tests.unit.test_feishu_proxy -v`  
+Run: `python3 -m unittest tests.unit.test_config_domain tests.unit.test_feishu_proxy -v`
 Expected: FAIL because the new proxy API and credential shape do not exist.
 
 - [ ] **Step 4: Implement the configuration boundary**
@@ -65,7 +65,7 @@ In `proxy.py`, implement the exact precedence and URL validation without perform
 
 - [ ] **Step 5: Run the focused tests and commit**
 
-Run: `python3 -m unittest tests.unit.test_config_domain tests.unit.test_feishu_proxy -v`  
+Run: `python3 -m unittest tests.unit.test_config_domain tests.unit.test_feishu_proxy -v`
 Expected: PASS.
 
 ```bash
@@ -97,7 +97,7 @@ Assert one accepted event atomically inserts the existing inbound row and fixed 
 
 - [ ] **Step 3: Run the focused tests and verify failure**
 
-Run: `python3 -m unittest tests.unit.test_feishu tests.unit.test_feishu_intake -v`  
+Run: `python3 -m unittest tests.unit.test_feishu tests.unit.test_feishu_intake -v`
 Expected: FAIL because normalization still requires webhook authentication and `EventIntake` is absent.
 
 - [ ] **Step 4: Implement pure normalization and transactional intake**
@@ -106,7 +106,7 @@ Remove signature, token, encryption, challenge, and HTTP-body decoding from `eve
 
 - [ ] **Step 5: Run the focused tests and commit**
 
-Run: `python3 -m unittest tests.unit.test_feishu tests.unit.test_feishu_intake -v`  
+Run: `python3 -m unittest tests.unit.test_feishu tests.unit.test_feishu_intake -v`
 Expected: PASS.
 
 ```bash
@@ -141,7 +141,7 @@ Use fake SDK modules to pin the supported version/signature contract, proxy-awar
 
 - [ ] **Step 3: Run the focused tests and verify failure**
 
-Run: `python3 -m unittest tests.unit.test_feishu_connection tests.unit.test_ws_compat -v`  
+Run: `python3 -m unittest tests.unit.test_feishu_connection tests.unit.test_ws_compat -v`
 Expected: FAIL because connection modules do not exist.
 
 - [ ] **Step 4: Pin dependencies and implement the compatibility boundary**
@@ -154,7 +154,7 @@ Classify credential/SDK compatibility failures as fatal; retry transport failure
 
 - [ ] **Step 6: Run the focused tests and commit**
 
-Run: `python3 -m unittest tests.unit.test_feishu_connection tests.unit.test_ws_compat -v`  
+Run: `python3 -m unittest tests.unit.test_feishu_connection tests.unit.test_ws_compat -v`
 Expected: PASS with no network access.
 
 ```bash
@@ -184,7 +184,7 @@ Assert `AppConfig` has no `callback`, `load_config` rejects an obsolete `callbac
 
 - [ ] **Step 3: Run the focused tests and verify failure**
 
-Run: `python3 -m unittest tests.integration.test_runtime tests.unit.test_config_domain -v`  
+Run: `python3 -m unittest tests.integration.test_runtime tests.unit.test_config_domain -v`
 Expected: FAIL because runtime still starts `serve_gateway` and config still exposes callback.
 
 - [ ] **Step 4: Integrate the new services**
@@ -193,7 +193,7 @@ Resolve bot identity using the existing REST client, construct one `ConnectionSt
 
 - [ ] **Step 5: Run the focused tests and commit**
 
-Run: `python3 -m unittest tests.integration.test_runtime tests.unit.test_config_domain -v`  
+Run: `python3 -m unittest tests.integration.test_runtime tests.unit.test_config_domain -v`
 Expected: PASS.
 
 ```bash
@@ -226,7 +226,7 @@ Assert the page displays connected/reconnecting/fatal state and last safe error,
 
 - [ ] **Step 3: Run the focused tests and verify failure**
 
-Run: `python3 -m unittest tests.unit.test_admin_api tests.integration.test_admin_page -v`  
+Run: `python3 -m unittest tests.unit.test_admin_api tests.integration.test_admin_page -v`
 Expected: FAIL because the status endpoint and UI do not exist.
 
 - [ ] **Step 4: Implement status injection, route, and UI**
@@ -235,7 +235,7 @@ Add an optional status provider to `AdminApplication` and `serve_admin`; default
 
 - [ ] **Step 5: Run the focused tests and commit**
 
-Run: `python3 -m unittest tests.unit.test_admin_api tests.integration.test_admin_page -v`  
+Run: `python3 -m unittest tests.unit.test_admin_api tests.integration.test_admin_page -v`
 Expected: PASS.
 
 ```bash
@@ -265,7 +265,7 @@ Point the command at a temporary migrated database and fake clients, then assert
 
 - [ ] **Step 3: Run the focused tests and verify failure**
 
-Run: `python3 -m unittest tests.integration.test_feishu_check tests.integration.test_dry_run -v`  
+Run: `python3 -m unittest tests.integration.test_feishu_check tests.integration.test_dry_run -v`
 Expected: FAIL because `check-feishu` is not registered.
 
 - [ ] **Step 4: Implement the bounded diagnostic flow**
@@ -274,7 +274,7 @@ Load credentials, validate proxy, resolve bot identity, perform one bounded long
 
 - [ ] **Step 5: Run the focused tests and commit**
 
-Run: `python3 -m unittest tests.integration.test_feishu_check tests.integration.test_dry_run -v`  
+Run: `python3 -m unittest tests.integration.test_feishu_check tests.integration.test_dry_run -v`
 Expected: PASS.
 
 ```bash
@@ -309,7 +309,7 @@ Assert Dockerfile has no `EXPOSE`, compose has no `ports`, callback secrets are 
 
 - [ ] **Step 3: Run acceptance and deployment tests and verify failure**
 
-Run: `python3 -m unittest tests.test_hotnews tests.unit.test_deployment_contract -v`  
+Run: `python3 -m unittest tests.test_hotnews tests.unit.test_deployment_contract -v`
 Expected: FAIL while webhook code and port mappings still exist.
 
 - [ ] **Step 4: Delete callback-only code and update exports**
@@ -322,13 +322,13 @@ Document installing/running, `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, proxy precede
 
 - [ ] **Step 6: Run acceptance, static checks, and full suite**
 
-Run: `python3 -m unittest tests.test_hotnews tests.unit.test_deployment_contract -v`  
+Run: `python3 -m unittest tests.test_hotnews tests.unit.test_deployment_contract -v`
 Expected: PASS.
 
-Run: `python3 -m unittest discover -s tests -v`  
+Run: `python3 -m unittest discover -s tests -v`
 Expected: all tests PASS with no network access.
 
-Run: `python3 -m compileall -q src tests && git diff --check`  
+Run: `python3 -m compileall -q src tests && git diff --check`
 Expected: exit 0.
 
 - [ ] **Step 7: Run optional real read-only diagnostic**
