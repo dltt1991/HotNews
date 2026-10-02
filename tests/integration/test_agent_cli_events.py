@@ -135,6 +135,38 @@ class AgentCLIEventTests(unittest.TestCase):
                                                           "intent": {"action": "cancel_subscription", "subscription_number": 1}}))
         self.assertEqual(value["result"]["subscription"]["state"], "cancelled")
 
+    def test_invalid_business_targets_reply_complete_and_replay_without_mutation(self):
+        self.event(chat_id="chat-b")
+        self.success(self.invoke("claim-events", {"owner": "worker"}))
+        self.success(self.invoke("apply-intent", {"event_id": "event-1", "owner": "worker", "intent": CREATE}))
+        before = [dict(row) for row in self.rows("subscriptions")]
+        for index, (action, number) in enumerate((
+                ("cancel_subscription", 999), ("run_subscription_now", 999),
+                ("cancel_subscription", 1), ("run_subscription_now", 1)), start=2):
+            with self.subTest(action=action, number=number):
+                self.event(index, chat_id="chat-a")
+                self.success(self.invoke("claim-events", {"owner": "worker"}))
+                value = {"event_id": "event-%d" % index, "owner": "worker",
+                         "intent": {"action": action, "subscription_number": number}}
+                count = len(self.rows("outbox"))
+                first = self.success(self.invoke("apply-intent", value))
+                self.assertIsNone(first["result"]["subscription"])
+                self.assertIn("查看订阅", first["result"]["message"])
+                event = self.events.get(value["event_id"])
+                self.assertEqual(event.status, "completed")
+                self.assertIsNone(event.lease_owner)
+                queued = self.rows("outbox")
+                self.assertEqual(len(queued), count + 1)
+                self.assertEqual((queued[-1]["chat_id"], queued[-1]["idempotency_key"]),
+                                 ("chat-a", "event:%s:result" % value["event_id"]))
+                self.assertEqual(json.loads(queued[-1]["content_json"])["elements"][0]["text"]["content"],
+                                 first["result"]["message"])
+                replayed = self.success(self.invoke("apply-intent", dict(value, owner="later-worker")))
+                self.assertEqual(replayed, first)
+                self.assertEqual(len(self.rows("outbox")), count + 1)
+                self.assertEqual([dict(row) for row in self.rows("subscriptions")], before)
+                self.assertEqual(self.rows("subscription_runs"), [])
+
     def test_fail_event_is_owner_checked_and_stores_safe_diagnostic(self):
         self.event()
         self.success(self.invoke("claim-events", {"owner": "worker"}))

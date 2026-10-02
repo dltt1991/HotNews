@@ -9,7 +9,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from hotnews.domain import Intent, LeaseConflict, Schedule, ValidationError
+from hotnews.domain import Intent, LeaseConflict, Schedule, ValidationError, VersionConflict
 from hotnews.commands import handle_command
 from hotnews.commands.schema import parse_intent
 from hotnews.commands.service import CommandService
@@ -118,6 +118,12 @@ class CommandServiceTests(unittest.TestCase):
     def apply(self, value=CREATE, **event_options):
         return self.service.apply(self.event(**event_options), "worker", parse_intent(value))
 
+    def business_result(self, event_id, intent):
+        try:
+            return self.service.apply(event_id, "worker", intent)
+        except ValidationError:
+            self.fail("A business-invalid target must return help instead of a validation error")
+
     def test_create_preserves_original_and_expanded_keywords_with_local_next_time(self):
         result = self.apply()
         saved = result.subscription
@@ -149,14 +155,44 @@ class CommandServiceTests(unittest.TestCase):
         self.assertEqual(self.subscriptions.get(saved.id).state, "cancelled")
         self.assertEqual(self.apply({"action": "list_subscriptions"}).subscriptions, ())
 
-    def test_cross_group_number_is_rejected_without_any_mutation(self):
+    def test_cross_group_number_completes_with_one_help_reply_without_target_mutation(self):
         saved = self.apply(chat_id="chat-b").subscription
         for action in ("cancel_subscription", "run_subscription_now"):
             event_id = self.event(chat_id="chat-a")
-            with self.subTest(action=action), self.assertRaises(ValidationError):
-                self.service.apply(event_id, "worker", parse_intent({"action": action, "subscription_number": 1}))
-        self.assertEqual(self.subscriptions.get(saved.id).state, "ready")
-        self.assertEqual(len(self.rows("outbox")), 1)
+            intent = parse_intent({"action": action, "subscription_number": 1})
+            count = len(self.rows("outbox"))
+            with self.subTest(action=action):
+                result = self.business_result(event_id, intent)
+                self.assertIsNone(result.subscription)
+                self.assertIn("查看订阅", result.message)
+                self.assertIn("取消订阅 2", result.message)
+                self.assertEqual(self.events.get(event_id).status, "completed")
+                self.assertEqual(self.subscriptions.get(saved.id), saved)
+                replies = self.rows("outbox")
+                self.assertEqual(len(replies), count + 1)
+                self.assertEqual((replies[-1]["chat_id"], replies[-1]["idempotency_key"]),
+                                 ("chat-a", "event:%s:result" % event_id))
+                self.assertEqual(json.loads(replies[-1]["content_json"])["elements"][0]["text"]["content"],
+                                 result.message)
+                self.assertEqual(self.service.apply(event_id, "later-worker", intent), result)
+                self.assertEqual(len(self.rows("outbox")), count + 1)
+        self.assertEqual(self.rows("subscription_runs"), [])
+
+    def test_missing_and_cancelled_targets_complete_with_help_without_mutation(self):
+        saved = self.apply().subscription
+        cancelled = self.subscriptions.cancel(saved.id, saved.version, now=NOW)
+        for action in ("cancel_subscription", "run_subscription_now"):
+            for number in (999, 1):
+                with self.subTest(action=action, number=number):
+                    event_id = self.event()
+                    count = len(self.rows("outbox"))
+                    result = self.business_result(event_id, parse_intent(
+                        {"action": action, "subscription_number": number}))
+                    self.assertIsNone(result.subscription)
+                    self.assertIn("查看订阅", result.message)
+                    self.assertEqual(self.events.get(event_id).status, "completed")
+                    self.assertEqual(len(self.rows("outbox")), count + 1)
+                    self.assertEqual(self.subscriptions.get(cancelled.id), cancelled)
         self.assertEqual(self.rows("subscription_runs"), [])
 
     def test_same_display_number_in_different_groups_targets_event_group(self):
@@ -177,12 +213,48 @@ class CommandServiceTests(unittest.TestCase):
         self.assertEqual((runs[0]["trigger"], runs[0]["subscription_id"]), ("manual", saved.id))
         self.assertEqual(result.subscription.id, saved.id)
 
-    def test_empty_expansions_remain_pending_and_cannot_run_yet(self):
+    def test_empty_expansions_return_help_and_complete_event_without_manual_run(self):
         saved = self.apply(dict(CREATE, search_terms=[])).subscription
         self.assertEqual(saved.state, "search_terms_pending")
-        with self.assertRaises(ValidationError):
-            self.apply({"action": "run_subscription_now", "subscription_number": 1})
+        for paused in (False, True):
+            if paused:
+                saved = self.subscriptions.pause(saved.id, saved.version, now=NOW)
+            event_id = self.event()
+            count = len(self.rows("outbox"))
+            with self.subTest(paused=paused):
+                result = self.business_result(event_id, parse_intent(
+                    {"action": "run_subscription_now", "subscription_number": 1}))
+                self.assertIn("等待", result.message)
+                self.assertIn("搜索词", result.message)
+                self.assertIn("立即推送 1", result.message)
+                self.assertEqual(self.events.get(event_id).status, "completed")
+                self.assertEqual(self.subscriptions.get(saved.id), saved)
+                self.assertEqual(len(self.rows("outbox")), count + 1)
         self.assertEqual(self.rows("subscription_runs"), [])
+
+    def test_invalid_target_reply_storage_failure_rolls_back_event_completion(self):
+        event_id = self.event()
+        with patch.object(OutboxRepository, "enqueue", side_effect=RuntimeError("injected storage failure")):
+            with self.assertRaises(RuntimeError):
+                self.business_result(event_id, parse_intent(
+                    {"action": "cancel_subscription", "subscription_number": 999}))
+        self.assertEqual(self.events.get(event_id).status, "leased")
+        self.assertEqual(self.rows("outbox"), [])
+        self.assertEqual(self.rows("subscriptions"), [])
+
+    def test_unexpected_repository_errors_do_not_become_business_help(self):
+        saved = self.apply().subscription
+        for error in (VersionConflict("changed"), RuntimeError("storage failed"), ValidationError("unexpected")):
+            event_id = self.event()
+            with self.subTest(error=type(error).__name__):
+                with patch.object(SubscriptionRepository, "request_manual_run", side_effect=error):
+                    with self.assertRaises(type(error)):
+                        self.service.apply(event_id, "worker", parse_intent(
+                            {"action": "run_subscription_now", "subscription_number": 1}))
+                self.assertEqual(self.events.get(event_id).status, "leased")
+                self.assertEqual(self.subscriptions.get(saved.id), saved)
+                self.assertEqual(len(self.rows("outbox")), 1)
+                self.assertEqual(self.rows("subscription_runs"), [])
 
     def test_help_and_ambiguous_intent_produce_examples_without_subscription(self):
         for action in ("show_help", "clarification_required"):

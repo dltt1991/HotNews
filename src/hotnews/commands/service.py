@@ -157,11 +157,13 @@ class CommandService:
             subscription = self.subscriptions.get_by_number(event.chat_id, intent.subscription_number,
                                                             connection=connection)
             if subscription is None or subscription.state == "cancelled":
-                raise ValidationError("subscription number is not active in this group")
+                return CommandResult("本群没有该编号的有效订阅，请先查看订阅并确认编号。\n" + HELP)
             if action == "cancel_subscription":
                 subscription = self.subscriptions.cancel(subscription.id, subscription.version, now,
                                                           connection=connection)
                 return CommandResult("已取消订阅 #%d。" % subscription.display_number, subscription)
+            if subscription.state not in ("ready", "paused") or not subscription.search_terms:
+                return CommandResult("订阅正在等待搜索词更新，请稍后重试立即推送。\n" + HELP)
             self.subscriptions.request_manual_run(subscription.id, subscription.version, now, connection=connection)
             subscription = self.subscriptions.get(subscription.id, connection=connection)
             return CommandResult("已安排立即推送订阅 #%d，将在 5 分钟内处理。" % subscription.display_number, subscription)
