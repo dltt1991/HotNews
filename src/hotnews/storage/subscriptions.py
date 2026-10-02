@@ -23,7 +23,10 @@ def next_run(schedule: Schedule, now: datetime) -> Optional[datetime]:
     if schedule.kind == "manual":
         return None
     if schedule.kind == "interval":
-        return current + timedelta(minutes=schedule.interval_minutes)
+        try:
+            return current + timedelta(minutes=schedule.interval_minutes)
+        except OverflowError:
+            raise ValidationError("interval next run is outside the supported datetime range") from None
     local = current.astimezone(SHANGHAI)
     hour, minute = (int(part) for part in schedule.daily_at.split(":"))
     candidate = local.replace(hour=hour, minute=minute, second=0, microsecond=0)

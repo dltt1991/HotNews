@@ -159,6 +159,29 @@ class AdminTests(unittest.TestCase):
         self.item(self.request("PATCH", self.route(sub), {"version": current.version, "keywords": ["新主题"]}))
         self.assertEqual((self.count("articles"), self.count("deliveries"), self.count("outbox")), (1, 1, 1))
 
+    def test_unrepresentable_interval_edit_returns_400_without_changing_row_or_history(self):
+        sub = self.create()
+        self.repository.request_manual_run(sub.id, sub.version, now=NOW)
+        runs = RunRepository(self.database)
+        run = runs.claim_due("agent", 1, NOW, 60)[0]
+        runs.complete(run.id, "agent", [NewsResult("发布", "https://example.com/news", "官方",
+            NOW - timedelta(hours=1), "中文摘要", "release")], now=NOW, search_window_days=1)
+        current = self.repository.get(sub.id)
+        with self.database.connect() as connection:
+            history = {table: [dict(row) for row in connection.execute("SELECT * FROM " + table)]
+                       for table in ("articles", "deliveries", "subscription_runs", "outbox")}
+        for minutes in (10 ** 12, 10 ** 40):
+            with self.subTest(minutes=minutes):
+                response = self.request("PATCH", self.route(sub), {"version": current.version,
+                    "topic": "不得保存", "keywords": ["不得保存"],
+                    "schedule": {"kind": "interval", "interval_minutes": minutes}})
+                self.assertEqual(response.status, 400)
+                self.assertEqual(json.loads(response.body), {"error": "invalid_request"})
+                self.assertEqual(self.repository.get(sub.id), current)
+                with self.database.connect() as connection:
+                    for table, expected in history.items():
+                        self.assertEqual([dict(row) for row in connection.execute("SELECT * FROM " + table)], expected)
+
     def test_stale_version_for_every_mutation_preserves_newer_subscription(self):
         sub = self.create()
         newer = self.repository.update(sub.id, sub.version, topic="新主题", now=NOW)

@@ -31,6 +31,18 @@ class ScheduleTests(unittest.TestCase):
                                   NOW + timedelta(days=4)),
                          datetime(2026, 10, 6, 0, 5, tzinfo=timezone.utc))
 
+    def test_unrepresentable_interval_next_time_is_validation_failure(self):
+        for minutes in (10 ** 12, 10 ** 40):
+            with self.subTest(minutes=minutes), self.assertRaises(ValidationError):
+                next_run(Schedule("interval", interval_minutes=minutes), NOW)
+
+    def test_interval_limit_is_derived_from_remaining_datetime_range(self):
+        near_maximum = datetime(9999, 12, 31, 23, 50, tzinfo=timezone.utc)
+        self.assertEqual(next_run(Schedule("interval", interval_minutes=9), near_maximum),
+                         datetime(9999, 12, 31, 23, 59, tzinfo=timezone.utc))
+        with self.assertRaises(ValidationError):
+            next_run(Schedule("interval", interval_minutes=10), near_maximum)
+
     def test_interval_minimum_and_aware_timestamp_are_required(self):
         with self.assertRaises(ValidationError):
             Schedule("interval", interval_minutes=4)
